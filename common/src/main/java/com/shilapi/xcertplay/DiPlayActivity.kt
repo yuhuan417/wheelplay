@@ -431,10 +431,6 @@ class DiPlayActivity : AppCompatActivity() {
                 } }
             }.apply { visibility = View.GONE }
             body.addView(disconnectButton, ui.secondaryButtonLayout(12))
-            if (carHotspotOff()) {
-                body.addView(label("热点“${AirPlayPersistence.loadManualHotspotSsid(this)}”尚未开启，请先在系统设置中打开。", 15, WARNING).apply { setPadding(0, dp(16), 0, 0) })
-                body.addView(button("打开热点设置", false) { openCarWifiSettings() }, ui.secondaryButtonLayout(12))
-            }
         }
         ui.card(content, "USB 连接", R.drawable.ic_server_usb) { body ->
             body.addView(label("使用数据线连接 iPhone 与此设备，并在 iPhone 上允许 CarPlay。", 15, MUTED))
@@ -941,19 +937,6 @@ class DiPlayActivity : AppCompatActivity() {
         handler.post { render(); refreshService() }
     }
 
-    // The car hotspot link needs the hotspot on; DiPlay only checks it (turning it on needs ADB-only permission).
-    private fun carHotspotOff(): Boolean =
-        AirPlayPersistence.loadWirelessHotspotMode(this) == WirelessHotspotMode.MANUAL &&
-            com.shilapi.xcertplay.network.CarHotspotStatus.isEnabled(this) == false
-
-    private fun carHotspotOffDialog() {
-        MaterialAlertDialogBuilder(this).setTitle("热点尚未开启")
-            .setMessage("当前使用热点“${AirPlayPersistence.loadManualHotspotSsid(this)}”，请先在系统设置中开启后再连接。")
-            .setPositiveButton("打开系统设置") { _, _ -> openCarWifiSettings() }
-            .setNeutralButton("连接") { _, _ -> connect(true) }
-            .setNegativeButton("取消", null).show()
-    }
-
     // BYD maps the AOSP tether action to its own hotspot screen; other firmware falls back to Wi-Fi settings.
     // BYD shows that screen as a dialog and closes it unless its own settings or the car home screen is on top,
     // so the home screen goes first.
@@ -1173,7 +1156,6 @@ class DiPlayActivity : AppCompatActivity() {
     private fun connect(wireless: Boolean) {
         refreshAuthentication()
         if (setupError != null) { toast(setupError!!); return }
-        if (wireless && carHotspotOff()) { carHotspotOffDialog(); return }
         if (wireless && DiPlayPreferences.phoneAddress(this) == null) {
             pendingWireless = true; choosePhone(); return
         }

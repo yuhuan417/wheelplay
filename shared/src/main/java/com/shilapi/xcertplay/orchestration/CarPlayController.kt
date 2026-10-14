@@ -1571,7 +1571,9 @@ class CarPlayController(
         if (hotspotMode == WirelessHotspotMode.MANUAL &&
             com.shilapi.xcertplay.network.CarHotspotStatus.isEnabled(appContext) == false
         ) {
-            throw IOException("The car hotspot is off. Turn it on in the car settings and connect again.")
+            // Informational only: firmware can misreport the AP state (Wi-Fi bridge / repeater modes).
+            // The configured credentials are what the iPhone is told, so nothing here blocks.
+            debugLog("manual hotspot reported off by the system; sending configured credentials anyway")
         }
         val manager: WirelessHotspotManager = when (hotspotMode) {
             WirelessHotspotMode.WIFI_P2P -> WifiP2pGroupManager(appContext, ::debugLog)
