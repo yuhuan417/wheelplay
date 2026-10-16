@@ -16,6 +16,8 @@ internal class RtcVideoStream(
     private val recovery: RtcRecoveryPolicy,
     private val offer: (String) -> Unit,
     private val failure: () -> Unit,
+    /** Mirrors the transport decisions into the app's diagnostic log, not just logcat. */
+    private val log: (String) -> Unit = {},
 ) : Closeable {
     private val worker = Executors.newSingleThreadScheduledExecutor()
     private val closed = AtomicBoolean(false)
@@ -46,6 +48,7 @@ internal class RtcVideoStream(
                     "offer" -> offer(value)
                     "connected" -> {
                         Log.i("WheelPlayRtc", "${config.codec} direct stream connected profile=${config.profile}")
+                        log("WebRTC connected ${config.codec} profile=${config.profile}")
                         disconnectedSince = null
                         blockedSince = null
                         connected = true; source.requestKeyframe(force = true)
@@ -172,6 +175,7 @@ internal class RtcVideoStream(
     private fun fail(reason: String) {
         if (!closed.get()) {
             Log.w("WheelPlayRtc", "Using JPEG: $reason (grace=${recovery.graceMs}ms)")
+            log("WebRTC fallback to JPEG: $reason (grace=${recovery.graceMs}ms)")
             failure()
         }
     }

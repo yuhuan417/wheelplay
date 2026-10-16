@@ -266,7 +266,8 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                         JSONObject().put("type", "rtc-offer").put("id", id).put("codec", config.codec.name)
                             .put("recoveryGraceMs", recovery.graceMs).put("sdp", sdp).toString())
                 }
-            }, failure = { synchronized(rtcLock) { if (rtcId == id) stopRtc() } })
+            }, failure = { synchronized(rtcLock) { if (rtcId == id) stopRtc() } },
+                log = { com.shilapi.xcertplay.DiagnosticLogSink.append(it) })
             rtc = stream
             if (!source.attach(stream, config)) { stopRtc(); return }
             stream.start()
@@ -395,10 +396,21 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                         }
                     }
                     "rtc-ready" -> synchronized(rtcLock) {
-                        if (data.getLong("id") == rtcId) { rtc?.displayed(); sender.acknowledge() }
+                        if (data.getLong("id") == rtcId) {
+                            com.shilapi.xcertplay.DiagnosticLogSink.append("WebRTC video displayed by the browser")
+                            rtc?.displayed(); sender.acknowledge()
+                        }
                     }
                     "rtc-fallback" -> synchronized(rtcLock) {
-                        if (data.getLong("id") == rtcId) stopRtc()
+                        // The browser decides this one on its own, so it is the only record of why
+                        // no WebRTC path could be used. Report it instead of stopping silently.
+                        if (data.getLong("id") == rtcId) {
+                            com.shilapi.xcertplay.DiagnosticLogSink.append(
+                                "WebRTC declined by the browser (codec unsupported, no UDP path, " +
+                                    "rejected SDP, or decode failure); using JPEG",
+                            )
+                            stopRtc()
+                        }
                     }
                     "touch" -> {
                         val contacts = data.getJSONArray("contacts")

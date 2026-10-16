@@ -707,6 +707,7 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         currentSurface = null
         currentSurfaceTexture = null
+        DiagnosticLogSink.attach(null)
         sessionLog?.append("Activity destroyed")
         sessionLog?.close()
         sessionLog = null
@@ -3422,6 +3423,9 @@ class CarPlayHostActivity : ComponentActivity() {
             )
         }
         sessionLog = activeLog
+        // The WebRTC transport runs under the Web server and has no reference to this activity,
+        // so it reaches the report through this sink.
+        DiagnosticLogSink.attach { appendLog(it) }
     }
 
     private fun refreshLogView(nowMillis: Long) {
