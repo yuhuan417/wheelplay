@@ -41,7 +41,9 @@ class DiPlaySessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        RootAccess.checkOnStartup()
+        if (com.shilapi.xcertplay.web.TeslaHttpCompatibility.config(this).let {
+            it.enabled && it.mode == com.shilapi.xcertplay.network.TeslaHttpMode.ROOT
+        }) RootAccess.checkOnStartup()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "CarPlay 服务", NotificationManager.IMPORTANCE_LOW))
         media = CarPlayMediaSessionBridge(this) { state, session, artwork ->

@@ -20,6 +20,7 @@ import java.io.IOException
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -60,6 +61,99 @@ open class CarPlayVpnService : VpnService() {
     private var bridge: Ipv6NcmBridge? = null
     private var tun: ParcelFileDescriptor? = null
     private var attachGeneration = 0
+    private var teslaAddress: String? = null
+    private var installedTeslaAddress: String? = null
+    private var teslaAnchor: ParcelFileDescriptor? = null
+    private var teslaAnchorDuplicate: ParcelFileDescriptor? = null
+    private var teslaPlaceholder: ParcelFileDescriptor? = null
+    private var teslaFailure: String? = null
+    private var destroying = false
+    @Volatile var teslaVpnStatus = TeslaHttpStatus(mode = TeslaHttpMode.VPN)
+        private set
+
+    /** No packet reader is attached to these IPv4 TUNs. Only the NCM TUN exchanges packets. */
+    protected open fun establishTeslaTunnel(address: String): ParcelFileDescriptor = Builder()
+        .setSession("WheelPlay Tesla (experimental)")
+        .allowFamily(OsConstants.AF_INET)
+        .allowFamily(OsConstants.AF_INET6)
+        .allowBypass()
+        .addAddress(address, 32)
+        .addRoute(address, 32)
+        .establish() ?: throw IOException("Tesla VPN 未获授权，请在设置中授权后重试")
+
+    protected open fun duplicateTeslaTunnel(fd: ParcelFileDescriptor): ParcelFileDescriptor =
+        fd.dup()
+
+    protected open fun isTeslaAddressPresent(address: String): Boolean =
+        NetworkInterface.getNetworkInterfaces()?.toList().orEmpty().any { iface ->
+            // The retained anchor is deliberately DOWN; do not filter by isUp.
+            iface.inetAddresses.toList().any { it.hostAddress == address }
+        }
+
+    /** Called by the independent Web owner, including while no iPhone is attached. */
+    @Synchronized
+    fun setTeslaAddress(address: String?, retry: Boolean = false): TeslaHttpStatus {
+        require(address == null || TeslaHttpConfig.isHttpAddress(address) &&
+            address != TeslaHttpConfig.VPN_PLACEHOLDER_ADDRESS)
+        if (address != teslaAddress || retry) teslaFailure = null
+        teslaAddress = address
+        reconcileTeslaLocked()
+        return teslaVpnStatus
+    }
+
+    private fun reconcileTeslaLocked() {
+        val address = teslaAddress
+        if (address == null || destroying) {
+            closeTeslaLocked()
+            teslaVpnStatus = TeslaHttpStatus(mode = TeslaHttpMode.VPN)
+            return
+        }
+        try {
+            teslaFailure?.let { throw IOException(it) }
+            // Do not call prepare() from reconciliation: a pre-consented app can take VPN
+            // ownership back from another app. establish() itself fails if no longer prepared.
+            if (installedTeslaAddress != address) {
+                if (tun != null) {
+                    teslaVpnStatus = TeslaHttpStatus(error = "请先断开有线 CarPlay，再应用免 Root 模式或新访问 IP", mode = TeslaHttpMode.VPN)
+                    return
+                }
+                closeTeslaLocked()
+                teslaAnchor = establishTeslaTunnel(address)
+                teslaAnchorDuplicate = duplicateTeslaTunnel(teslaAnchor!!)
+                installedTeslaAddress = address
+            }
+            if (tun == null && teslaPlaceholder == null) {
+                teslaPlaceholder = establishTeslaTunnel(TeslaHttpConfig.VPN_PLACEHOLDER_ADDRESS)
+            }
+            if (!isTeslaAddressPresent(address)) throw IOException("系统未保留访问 IP；此设备可能不支持免 Root 模式，请关闭或手动重试")
+            teslaVpnStatus = TeslaHttpStatus(address = address, mode = TeslaHttpMode.VPN)
+        } catch (error: Exception) {
+            teslaFailure = error.message ?: "免 Root VPN 配置失败"
+            closeTeslaLocked()
+            teslaVpnStatus = TeslaHttpStatus(error = teslaFailure, mode = TeslaHttpMode.VPN)
+        }
+    }
+
+    private fun closeTeslaLocked() {
+        // Close every reference: the anchor disappears only after its last FD is closed.
+        listOf(teslaPlaceholder, teslaAnchorDuplicate, teslaAnchor).forEach { fd ->
+            runCatching { fd?.close() }.onFailure { Log.w(TAG, "Tesla TUN close failed", it) }
+        }
+        teslaPlaceholder = null
+        teslaAnchorDuplicate = null
+        teslaAnchor = null
+        installedTeslaAddress = null
+    }
+
+    /** Establish last; creating an IPv4 placeholder after this would deactivate the NCM link. */
+    @Synchronized
+    protected fun activateWiredTunnel(linkLocal: String): ParcelFileDescriptor {
+        val wired = establishTunnel(linkLocal)
+        tun = wired
+        teslaPlaceholder?.close()
+        teslaPlaceholder = null
+        return wired
+    }
     /** Only the original wired CarPlay IPv6 link uses Android's VPN API. */
     protected open fun establishTunnel(linkLocal: String): ParcelFileDescriptor = Builder()
         .allowFamily(OsConstants.AF_INET)
@@ -98,8 +192,7 @@ open class CarPlayVpnService : VpnService() {
             }
             require(hostMac.size == 6) { "hostMac must be 6 bytes" }
 
-            val tunFd = establishTunnel(linkLocal)
-            tun = tunFd
+            val tunFd = activateWiredTunnel(linkLocal)
 
             val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error ->
                 onTransportError(generation, listener, error)
@@ -160,15 +253,19 @@ open class CarPlayVpnService : VpnService() {
 
     @Synchronized
     override fun onRevoke() {
+        teslaFailure = "VPN 授权已撤销，请在设置中重新授权并重试"
         val listener = if (bridge != null) attachment?.listener else null
         // Wireless AirPlay does not depend on the wired VPN.
         if (bridge != null) releaseLocked() else closeTunnelLocked()
+        closeTeslaLocked()
+        teslaVpnStatus = TeslaHttpStatus(error = teslaFailure, mode = TeslaHttpMode.VPN)
         listener?.onTransportError("CarPlay VPN permission revoked")
         super.onRevoke()
     }
 
     @Synchronized
     override fun onDestroy() {
+        destroying = true
         releaseLocked()
         super.onDestroy()
     }
@@ -288,6 +385,7 @@ open class CarPlayVpnService : VpnService() {
         serverSocket = null
         closeSessionsLocked()
         closeTunnelLocked()
+        reconcileTeslaLocked()
     }
 
     private fun closeTunnelLocked() {
