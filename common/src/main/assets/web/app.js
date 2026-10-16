@@ -319,7 +319,11 @@ import { createBrowserAudio } from './browser-audio.js';
 
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
-  const screen = $('screen');
+  // JPEG frames are decoded into the idle buffer and swapped in only once the decode resolves.
+  // Reassigning the single visible element's src blanks it while the JPEG decodes, which reads
+  // as a flicker at frame rate on car hardware. `screen` always names the visible buffer.
+  let screen = $('screen');
+  let spare = $('screen-next');
   const video = $('video');
   const canvas = $('video-canvas');
   const display = $('display');
@@ -549,18 +553,35 @@ if (typeof document !== 'undefined') {
   function cancelMove() { moveGeneration++; movePending = false; }
   function contacts() { return [...pointers.values()].map(p => ({ id: p.id, x: p.x, y: p.y, down: true })); }
   function release() { cancelMove(); pointers.clear(); send({ type: 'touch', contacts: [] }); }
+  // Called once per decoded JPEG frame, so it must not touch the DOM while the state is unchanged.
+  // Both JPEG buffers carry the class so a swap never reveals an unstyled element.
   function setLive(value) {
+    if (live === value) return;
     live = value;
     screen.classList.toggle('stale', !value);
+    spare.classList.toggle('stale', !value);
     video.classList.toggle('stale', !value);
     canvas.classList.toggle('stale', !value);
     touchSurface.classList.toggle('stale', !value);
     $('waiting').hidden = value;
     if (!value && pointers.size) release();
   }
+  // Routine callers repeat the same text every frame or every status message; a held message
+  // outranks them until it expires so a one-shot event stays readable.
+  let statusHeldUntil = 0;
+  function setStatus(text, holdMillis = 0) {
+    const now = Date.now();
+    if (now < statusHeldUntil && holdMillis === 0) return;
+    const element = $('status');
+    // Comparing against the live DOM keeps this correct even when another path wrote directly.
+    if (element.textContent !== text) element.textContent = text;
+    statusHeldUntil = holdMillis > 0 ? now + holdMillis : 0;
+  }
   function cleanupImage() {
-    screen.onload = null; screen.onerror = null; screen.removeAttribute('src');
-    screen.hidden = true;
+    for (const buffer of [screen, spare]) {
+      buffer.onload = null; buffer.onerror = null;
+      buffer.removeAttribute('src'); buffer.hidden = true;
+    }
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = null;
   }
@@ -689,25 +710,43 @@ if (typeof document !== 'undefined') {
           if (!data.rtcAvailable) rtcRequested = false;
           setLive(Boolean(data.streaming && (rtc.active || lastFrame && screen.naturalWidth)));
           const transport = rtc.active ? `${rtc.codec === 'H265' ? 'HEVC' : 'H.264'} / WebRTC${useCanvas ? ' / Canvas' : ''}${rtcFps === null ? '' : ` · ${rtcFps} fps`}` : `JPEG${data.fallback ? ' · 已回退' : ''}`;
-          $('status').textContent = live ? `${transport}${rtc.recovering ? ' · 等待恢复' : ''} · 触控已连接` : '已连接 · 等待 iPhone 画面';
+          // A fallback is a one-shot event that the next JPEG frame would otherwise overwrite
+          // within one frame interval, so hold it long enough to be read.
+          setStatus(
+            live ? `${transport}${rtc.recovering ? ' · 等待恢复' : ''} · 触控已连接` : '已连接 · 等待 iPhone 画面',
+            data.fallback ? 3000 : 0,
+          );
         }
-        if (data.type === 'input-unavailable') $('status').textContent = '等待 iPhone 触控通道就绪';
+        if (data.type === 'input-unavailable') setStatus('等待 iPhone 触控通道就绪');
         return;
       }
       if (browserAudio.receive(event.data)) return;
       if (rtc && rtc.active) { send({ type: 'ack' }); return; }
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      objectUrl = URL.createObjectURL(event.data instanceof ArrayBuffer ? new Blob([event.data], { type: 'image/jpeg' }) : event.data);
-      screen.onload = () => {
+      // Load into the idle buffer and swap only once it has loaded, so the visible element always
+      // holds a paintable frame. Pointing the one visible element at a new blob blanks it for the
+      // whole fetch and decode, which is the flicker seen at frame rate on car hardware.
+      const displayedUrl = objectUrl;
+      const nextUrl = URL.createObjectURL(event.data instanceof ArrayBuffer ? new Blob([event.data], { type: 'image/jpeg' }) : event.data);
+      objectUrl = nextUrl;
+      const target = spare;
+      target.onload = () => {
+        target.onload = null; target.onerror = null;
         if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
         if (rtc && rtc.active) { send({ type: 'ack' }); return; }
-        screen.hidden = false;
+        target.hidden = false;
+        screen.hidden = true; screen.removeAttribute('src');
+        spare = screen; screen = target;
         lastFrame = Date.now(); width = screen.naturalWidth; height = screen.naturalHeight;
-        if (!rtc || !rtc.active) { setLive(true); $('status').textContent = 'JPEG · 触控已连接'; }
+        setLive(true);
+        setStatus('JPEG · 触控已连接');
         send({ type: 'ack' });
+        if (displayedUrl) URL.revokeObjectURL(displayedUrl);
       };
-      screen.onerror = () => { screen.hidden = true; ws.close(); };
-      screen.src = objectUrl;
+      target.onerror = () => {
+        target.onload = null; target.onerror = null;
+        if (socket === ws) { screen.hidden = true; ws.close(); }
+      };
+      target.src = nextUrl;
     };
     ws.onclose = () => {
       clearTimeout(connectTimer);

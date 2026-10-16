@@ -28,6 +28,9 @@ function fixture({ storedCanvas = null, storageDisabled = false, canvasAvailable
       addEventListener(name, fn) { this.handlers[name] = fn; } });
     return elements.get(id);
   };
+  // The JPEG path double-buffers: exactly one of the two image elements holds a pending load.
+  const pending = () => [element('screen'), element('screen-next')]
+    .find(candidate => typeof candidate.onload === 'function');
   class Socket {
     static OPEN = 1;
     constructor(url) { this.url = url; this.readyState = 0; this.bufferedAmount = 0; this.sent = []; sockets.push(this); }
@@ -76,13 +79,15 @@ function fixture({ storedCanvas = null, storageDisabled = false, canvasAvailable
     },
   };
   vm.runInNewContext(source, context);
-  return { element, sockets, timers, peers, draws, preferences, raf, videoCallbacks, document, fullscreenCalls,
+  return { element, pending, sockets, timers, peers, draws, preferences, raf, videoCallbacks, document, fullscreenCalls,
     async connect() {
       element('connect-form').handlers.submit({ preventDefault() {} });
       await new Promise(resolve => setImmediate(resolve));
       const ws = sockets.at(-1); ws.readyState = 1; ws.onopen(); return ws;
     },
-    frame(ws) { ws.onmessage({ data: {} }); element('screen').onload(); },
+    // JPEG frames load into the idle buffer and swap in on load, so the pending handler moves
+    // between the two image elements. `pending` names whichever one is currently loading.
+    frame(ws) { ws.onmessage({ data: {} }); pending().onload(); },
     async offer(ws, id = 1) {
       ws.onmessage({ data: JSON.stringify({ type: 'rtc-offer', id, sdp: 'offer' }) });
       await new Promise(resolve => setImmediate(resolve));
@@ -203,7 +208,10 @@ test('disconnect drops pending ACK and old animation callbacks cannot send into 
   const f = fixture(), old = await f.connect(); f.frame(old); f.pointer('pointerdown');
   f.pointer('pointermove', 200);
   old.bufferedAmount = 8192; f.frame(old);
-  const lateImageLoad = f.element('screen').onload;
+  // Hand over a frame that has not finished loading, then resolve it after the socket is
+  // replaced. Double buffering parks that handler on the idle image element.
+  old.onmessage({ data: {} });
+  const lateImageLoad = f.pending().onload;
   old.close();
   const current = await f.connect(); f.frame(current); f.pointer('pointerdown', 300);
   const before = current.sent.length;
@@ -257,7 +265,7 @@ test('a recoverable WebRTC disconnect preserves video and touch and reports reco
 
 test('Canvas WebRTC handles touch, late JPEG loads, and reconnection without leaving old callbacks', async () => {
   const f = fixture({ storedCanvas: 'true' }), ws = await f.connect();
-  ws.onmessage({ data: {} }); const lateImage = f.element('screen').onload;
+  ws.onmessage({ data: {} }); const lateImage = f.pending().onload;
   await f.offer(ws);
   assert.equal(f.element('video-canvas').hidden, false);
   assert.equal(f.element('video').hidden, false);
@@ -284,7 +292,9 @@ test('Canvas failure falls back to JPEG while control and the selected preferenc
   assert.equal(f.element('video').classList.contains('offscreen-video'), false);
   assert.equal(f.timers.size > 0 && [...f.timers.values()].some(t => t.delay === 1000), false);
   assert.equal(ws.sent.at(-1).type, 'rtc-fallback');
-  f.frame(ws); assert.equal(f.element('screen').hidden, false);
+  f.frame(ws);
+  // The swap decides which buffer is on screen, so assert on the surface rather than one element.
+  assert.equal([f.element('screen'), f.element('screen-next')].filter(buffer => !buffer.hidden).length, 1);
   f.pointer('pointerdown', 100, 'touch-surface'); f.pointer('pointerup', 100, 'touch-surface');
   assert.equal(ws.sent.filter(m => m.type === 'touch').length, 2);
   assert.equal(f.element('canvas-video').checked, true);
