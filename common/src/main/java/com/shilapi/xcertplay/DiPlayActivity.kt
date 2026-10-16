@@ -618,7 +618,12 @@ class DiPlayActivity : AppCompatActivity() {
                 AirPlayPersistence.saveAdaptiveBrowserSize(this, it)
                 WebSession.setAdaptiveBrowserSize(it)
             }
-            choice(card, "分辨率", listOf("原始分辨率", "80% · 降低负载", "60% · 最低负载"), listOf(10, 8, 6).indexOf(AirPlayPersistence.loadDisplayScaleTenths(this)).coerceAtLeast(0)) { AirPlayPersistence.saveDisplayScaleTenths(this, listOf(10, 8, 6)[it]) }
+            // 0.3x is CarPlayDisplayScale.MIN_TENTHS, so the list reaches the supported floor.
+            val resolutionScales = listOf(10, 8, 6, 3)
+            choice(card, "分辨率", listOf("原始分辨率", "80% · 降低负载", "60% · 更低负载", "30% · 最低负载"),
+                resolutionScales.indexOf(AirPlayPersistence.loadDisplayScaleTenths(this)).coerceAtLeast(0)) {
+                AirPlayPersistence.saveDisplayScaleTenths(this, resolutionScales[it])
+            }
             val bufferPresets = com.shilapi.xcertplay.media.MediaAudioBuffer.presets
             choice(card, "音频缓冲", listOf("300 ms · 默认", "500 ms", "1000 ms · 更稳定"),
                 bufferPresets.indexOf(AirPlayPersistence.loadMediaBufferMillis(this)).coerceAtLeast(0)) {
