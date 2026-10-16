@@ -51,3 +51,6 @@ replay_pid*
 # macOS metadata
 .DS_Store
 ._*
+
+# Chat attachments dropped into the working tree
+.feidex-attachments/
