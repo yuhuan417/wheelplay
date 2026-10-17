@@ -56,6 +56,8 @@ internal object WebSession {
     val httpListenerPort get() = server?.takeIf { it.ready }?.listeningPort
     val httpsListenerPort get() = secureServer?.takeIf { it.ready }?.listeningPort
     val hasViewer get() = server?.hasViewer == true || secureServer?.hasViewer == true
+    val jpegReady get() = server?.jpegReady == true || secureServer?.jpegReady == true
+    @Volatile private var jpegDemandListener: (() -> Unit)? = null
     val audio = BrowserAudioBridge()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var experienceContext: Context? = null
@@ -70,7 +72,12 @@ internal object WebSession {
         }
     }
 
+    fun notifyJpegDemand() {
+        jpegDemandListener?.invoke()
+    }
+
     fun viewerStateChanged() {
+        notifyJpegDemand()
         val refresh = {
             experienceContext?.let { offlineMonitor.refresh(AirPlayPersistence.loadBrowserOfflinePolicy(it).timeoutMillis) }
             Unit
@@ -372,12 +379,15 @@ internal object WebSession {
     }
 
     @Synchronized fun beginVideo(w: Int, h: Int): Long {
-        videoSource?.detach(); videoSource = null
+        videoSource?.detach(); videoSource = null; jpegDemandListener = null
         width = w; height = h; frame = null; videoActive = false
         return ++generation
     }
-    @Synchronized fun attachVideoSource(owner: Long, source: WebVideoSource) {
-        if (owner == generation) videoSource = source
+    @Synchronized fun attachVideoSource(owner: Long, source: WebVideoSource, onJpegDemand: (() -> Unit)? = null) {
+        if (owner == generation) {
+            videoSource = source
+            jpegDemandListener = onJpegDemand
+        }
     }
     fun publish(owner: Long, jpeg: ByteArray) {
         val endpoint = synchronized(this) {
@@ -390,7 +400,7 @@ internal object WebSession {
         secureServer?.frameAvailable()
     }
     @Synchronized fun endVideo(owner: Long) { if (owner == generation) {
-        videoSource?.detach(); videoSource = null
+        videoSource?.detach(); videoSource = null; jpegDemandListener = null
         generation++; frame = null; videoActive = false
     } }
     @Synchronized fun stop() {
@@ -403,7 +413,7 @@ internal object WebSession {
         val oldSecure = secureServer; secureServer = null
         val cleanupError = runCatching { oldSecure?.stop() }.exceptionOrNull()
         tls = null; tlsError = cleanupError?.message
-        videoSource?.detach(); videoSource = null
+        videoSource?.detach(); videoSource = null; jpegDemandListener = null
         val old = server; server = null
         runCatching { old?.stop() }.exceptionOrNull()?.let { error = it.message }
         browserViewport = null

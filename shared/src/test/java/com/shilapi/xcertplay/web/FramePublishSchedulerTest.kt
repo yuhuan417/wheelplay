@@ -29,9 +29,9 @@ class FramePublishSchedulerTest {
     @Test fun finalFrameInsideThrottleWindowIsPublishedWithoutAnotherArrival() {
         val f = Fixture()
         f.frame(1); f.advance(0)
-        f.advance(33); f.frame(2)
-        f.advance(65); assertEquals(listOf(1), f.published)
-        f.advance(66); assertEquals(listOf(1, 2), f.published)
+        f.advance(16); f.frame(2)
+        f.advance(32); assertEquals(listOf(1), f.published)
+        f.advance(33); assertEquals(listOf(1, 2), f.published)
         f.advance(1000); assertEquals(2, f.published.size)
         assertTrue(f.tasks.isEmpty())
     }
@@ -39,16 +39,16 @@ class FramePublishSchedulerTest {
     @Test fun burstKeepsOneTaskAndPublishesOnlyTheLatestTexture() {
         val f = Fixture()
         f.frame(1); f.advance(0)
-        for (i in 2..60) { f.advance(i.toLong()); f.frame(i) }
+        for (i in 2..30) { f.advance(i.toLong()); f.frame(i) }
         assertEquals(1, f.tasks.size)
-        f.advance(66)
-        assertEquals(listOf(1, 60), f.published)
+        f.advance(33)
+        assertEquals(listOf(1, 30), f.published)
     }
 
     @Test fun viewerReturningGetsTheLatestStaticFrame() {
         val f = Fixture()
         f.frame(1); f.advance(0)
-        f.advance(33); f.frame(2)
+        f.advance(16); f.frame(2)
         f.viewing = false; f.advance(100)
         f.frame(3); f.advance(200)
         assertEquals(listOf(1), f.published)
@@ -60,7 +60,7 @@ class FramePublishSchedulerTest {
     @Test fun closingCancelsTheTrailingFrameAndRejectsLateNotifications() {
         val f = Fixture()
         f.frame(1); f.advance(0)
-        f.advance(33); f.frame(2); f.scheduler.close()
+        f.advance(16); f.frame(2); f.scheduler.close()
         f.frame(3); f.advance(1000)
         assertEquals(listOf(1), f.published)
         assertTrue(f.tasks.isEmpty())
@@ -74,5 +74,36 @@ class FramePublishSchedulerTest {
         assertEquals(listOf(1, 2), f.published)
         repeat(10) { f.scheduler.resume(); f.advance(400L + it * 200) }
         assertEquals(2, f.published.size)
+    }
+
+    @Test fun backpressurePausesCaptureAndAckResumesImmediatelyOrAtThrottleBoundary() {
+        val f = Fixture()
+        f.frame(1); f.advance(0)
+        assertEquals(listOf(1), f.published)
+        // Downstream is now busy (inFlight = true). New decoder frames arrive but are not compressed.
+        f.viewing = false
+        f.advance(10); f.frame(2)
+        f.advance(25); f.frame(3)
+        f.advance(50); f.frame(4)
+        assertEquals(listOf(1), f.published)
+        assertTrue(f.tasks.isEmpty())
+        // ACK arrives at t=50 (>= 33ms after t=0): resumes and publishes immediately at t=50.
+        f.viewing = true; f.scheduler.resume(); f.advance(50)
+        assertEquals(listOf(1, 4), f.published)
+        // Next frame arrives while busy, then ACK arrives early at t=60 (10ms after t=50): waits until t=83 (50 + 33).
+        f.viewing = false
+        f.advance(55); f.frame(5)
+        f.viewing = true; f.scheduler.resume()
+        f.advance(82); assertEquals(listOf(1, 4), f.published)
+        f.advance(83); assertEquals(listOf(1, 4, 5), f.published)
+    }
+
+    @Test fun offscreenEncodeDimensionsCapsLongEdgeAt960AndPreservesEvenAspectRatio() {
+        assertEquals(800 to 480, OffscreenVideoOutput.encodeDimensions(800, 480))
+        assertEquals(960 to 540, OffscreenVideoOutput.encodeDimensions(1280, 720))
+        assertEquals(960 to 540, OffscreenVideoOutput.encodeDimensions(1920, 1080))
+        assertEquals(960 to 704, OffscreenVideoOutput.encodeDimensions(1200, 880))
+        assertEquals(960 to 704, OffscreenVideoOutput.encodeDimensions(1280, 938))
+        assertEquals(704 to 960, OffscreenVideoOutput.encodeDimensions(880, 1200))
     }
 }

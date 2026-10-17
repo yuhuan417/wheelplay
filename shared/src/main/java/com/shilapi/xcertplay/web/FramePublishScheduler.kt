@@ -7,7 +7,7 @@ internal class FramePublishScheduler(
     private val post: (Runnable, Long) -> Unit,
     private val remove: (Runnable) -> Unit,
     private val publish: () -> Unit,
-    private val intervalMillis: Long = 66,
+    private val intervalMillis: Long = DEFAULT_INTERVAL_MILLIS,
 ) {
     private var lastPublished: Long? = null
     private var dirty = false
@@ -40,5 +40,9 @@ internal class FramePublishScheduler(
         dirty = false
         scheduled = false
         remove(task)
+    }
+
+    companion object {
+        const val DEFAULT_INTERVAL_MILLIS = 33L
     }
 }

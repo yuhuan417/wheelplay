@@ -14,6 +14,7 @@ internal class WebStreamSender(
     private val onFailure: () -> Unit,
     private val executor: ExecutorService = Executors.newSingleThreadExecutor(),
     private val now: () -> Long = SystemClock::elapsedRealtime,
+    private val onReadyForFrame: () -> Unit = {},
 ) : Closeable {
     enum class Control { STATUS, PHONE_CONNECT, INPUT_UNAVAILABLE, BUSY, PONG, CLOSE, RTC, MIC_CONFIG, MIC_STOP, AUDIO_STOP, AUDIO_RESET, AUDIO_ROUTE }
     private data class Outgoing(val frame: WebSocketFrame, val afterSend: () -> Unit = {})
@@ -29,6 +30,11 @@ internal class WebStreamSender(
     private val audio = java.util.ArrayDeque<Audio>()
     private val audioInFlight = linkedMapOf<Long, Long>()
     private var mediaBufferMillis = MediaAudioBuffer.DEFAULT_MILLIS
+
+    val readyForFrame: Boolean
+        get() = synchronized(lock) {
+            !closed && !inFlight && latestFrame()?.let { it.sequence == sequence } != false
+        }
 
     fun configureAudioBuffer(millis: Int) = synchronized(lock) {
         mediaBufferMillis = MediaAudioBuffer.sanitize(millis)
@@ -80,9 +86,13 @@ internal class WebStreamSender(
 
     fun frameAvailable() = synchronized(lock) { scheduleLocked() }
 
-    fun acknowledge() = synchronized(lock) {
-        inFlight = false
-        scheduleLocked()
+    fun acknowledge() {
+        val ready = synchronized(lock) {
+            inFlight = false
+            scheduleLocked()
+            !closed && latestFrame()?.let { it.sequence == sequence } != false
+        }
+        if (ready) onReadyForFrame()
     }
 
     fun control(kind: Control, frame: WebSocketFrame, key: Any = kind, afterSend: () -> Unit = {}) = synchronized(lock) {

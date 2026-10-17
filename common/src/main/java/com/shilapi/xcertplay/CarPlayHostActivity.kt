@@ -2786,10 +2786,10 @@ class CarPlayHostActivity : ComponentActivity() {
         val diagnosticLog = sessionLog
         val videoGeneration = WebSession.beginVideo(videoWidth, videoHeight)
         val source = com.shilapi.xcertplay.web.WebVideoSource(streamTechnology)
-        WebSession.attachVideoSource(videoGeneration, source)
         val output = OffscreenVideoOutput(videoWidth, videoHeight,
-            wanted = { WebSession.hasViewer && source.jpegNeeded },
+            wanted = { WebSession.jpegReady && source.jpegNeeded },
             publish = { WebSession.publish(videoGeneration, it) })
+        WebSession.attachVideoSource(videoGeneration, source, output::requestResume)
         return AndroidMediaSink(
             surface = output.surface,
             encodedVideo = source,

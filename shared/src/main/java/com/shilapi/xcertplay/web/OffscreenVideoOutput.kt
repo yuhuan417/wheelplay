@@ -25,10 +25,18 @@ class OffscreenVideoOutput(
     private val height: Int,
     private val wanted: () -> Boolean,
     private val publish: (ByteArray) -> Unit,
+    maxLongEdge: Int = DEFAULT_MAX_LONG_EDGE,
+    private val jpegQuality: Int = DEFAULT_JPEG_QUALITY,
 ) : Closeable {
+    private val encodeSize = encodeDimensions(width, height, maxLongEdge)
+    private val encodeWidth = encodeSize.first
+    private val encodeHeight = encodeSize.second
     private val thread = HandlerThread("wheelplay-video").apply { start() }
     private val handler = Handler(thread.looper)
+    private val encodeThread = HandlerThread("wheelplay-jpeg").apply { start() }
+    private val encodeHandler = Handler(encodeThread.looper)
     private val closed = AtomicBoolean(false)
+    private val encoding = AtomicBoolean(false)
     private var display = EGL14.EGL_NO_DISPLAY
     private var context = EGL14.EGL_NO_CONTEXT
     private var buffer = EGL14.EGL_NO_SURFACE
@@ -36,13 +44,14 @@ class OffscreenVideoOutput(
     private var program = 0
     private var textureId = 0
     private var bitmap: Bitmap? = null
+    private val encodedBytes = ByteArrayOutputStream(encodeWidth * encodeHeight / 6)
     lateinit var surface: Surface
         private set
     private var hasImage = false
     private var hadViewer = false
     private val publisher = FramePublishScheduler(
         now = SystemClock::elapsedRealtime,
-        wanted = { !closed.get() && wanted() },
+        wanted = { !closed.get() && !encoding.get() && wanted() },
         post = { task, delay -> handler.postDelayed(task, delay) },
         remove = { handler.removeCallbacks(it) },
         publish = ::draw,
@@ -60,7 +69,7 @@ class OffscreenVideoOutput(
             handler.postDelayed(this, 200)
         }
     }
-    private val pixels = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
+    private val pixels = ByteBuffer.allocateDirect(encodeWidth * encodeHeight * 4).order(ByteOrder.nativeOrder())
     private val vertices = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
         put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)); position(0)
     }
@@ -79,6 +88,17 @@ class OffscreenVideoOutput(
         failure?.let { close(); throw IllegalStateException("Offscreen video unavailable", it) }
     }
 
+    fun requestResume() {
+        if (closed.get()) return
+        handler.post {
+            if (closed.get()) return@post
+            val viewing = wanted()
+            if (viewing && !hadViewer && hasImage) publisher.request()
+            if (viewing) publisher.resume()
+            hadViewer = viewing
+        }
+    }
+
     private fun initialize() {
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 0))
@@ -91,7 +111,7 @@ class OffscreenVideoOutput(
         context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
         buffer = EGL14.eglCreatePbufferSurface(display, configs[0],
-            intArrayOf(EGL14.EGL_WIDTH, width, EGL14.EGL_HEIGHT, height, EGL14.EGL_NONE), 0)
+            intArrayOf(EGL14.EGL_WIDTH, encodeWidth, EGL14.EGL_HEIGHT, encodeHeight, EGL14.EGL_NONE), 0)
         check(EGL14.eglMakeCurrent(display, buffer, buffer, context))
         val ids = IntArray(1)
         GLES20.glGenTextures(1, ids, 0); textureId = ids[0]
@@ -117,7 +137,7 @@ class OffscreenVideoOutput(
         GLES20.glDeleteShader(vertex); GLES20.glDeleteShader(fragment)
         val linked = IntArray(1); GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
         check(linked[0] != 0) { GLES20.glGetProgramInfoLog(program) }
-        bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        bitmap = Bitmap.createBitmap(encodeWidth, encodeHeight, Bitmap.Config.ARGB_8888)
         texture = SurfaceTexture(textureId).apply {
             setDefaultBufferSize(width, height)
             setOnFrameAvailableListener({ consumeFrame() }, handler)
@@ -148,10 +168,19 @@ class OffscreenVideoOutput(
 
     private fun draw() {
         if (closed.get()) return
+        if (!encoding.compareAndSet(false, true)) {
+            publisher.request()
+            return
+        }
         try {
-            val input = texture ?: return
+            val input = texture
+            val frame = bitmap
+            if (input == null || frame == null) {
+                encoding.set(false)
+                return
+            }
             input.getTransformMatrix(matrix)
-            GLES20.glViewport(0, 0, width, height)
+            GLES20.glViewport(0, 0, encodeWidth, encodeHeight)
             GLES20.glUseProgram(program)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
@@ -163,15 +192,29 @@ class OffscreenVideoOutput(
             GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 0, vertices)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             pixels.clear()
-            GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
+            GLES20.glReadPixels(0, 0, encodeWidth, encodeHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
             pixels.rewind()
-            val frame = bitmap ?: return
             frame.copyPixelsFromBuffer(pixels)
-            val bytes = ByteArrayOutputStream(width * height / 6)
-            frame.compress(Bitmap.CompressFormat.JPEG, 75, bytes)
-            publish(bytes.toByteArray())
+            if (!encodeHandler.post { compressAndPublish(frame) }) {
+                encoding.set(false)
+            }
         } catch (error: Exception) {
+            encoding.set(false)
             Log.e("WheelPlay", "Offscreen frame failed", error)
+        }
+    }
+
+    private fun compressAndPublish(frame: Bitmap) {
+        try {
+            if (closed.get()) return
+            encodedBytes.reset()
+            frame.compress(Bitmap.CompressFormat.JPEG, jpegQuality, encodedBytes)
+            if (!closed.get()) publish(encodedBytes.toByteArray())
+        } catch (error: Exception) {
+            Log.e("WheelPlay", "Offscreen JPEG compression failed", error)
+        } finally {
+            encoding.set(false)
+            if (!closed.get()) handler.post { publisher.resume() }
         }
     }
 
@@ -185,7 +228,11 @@ class OffscreenVideoOutput(
         handler.removeCallbacks(viewerCheck)
         if (::surface.isInitialized) surface.release()
         texture?.release(); texture = null
-        bitmap?.recycle(); bitmap = null
+        val oldBitmap = bitmap; bitmap = null
+        if (!encodeHandler.post { oldBitmap?.recycle(); encodeThread.quitSafely() }) {
+            oldBitmap?.recycle()
+            encodeThread.quitSafely()
+        }
         if (display != EGL14.EGL_NO_DISPLAY) {
             if (program != 0) GLES20.glDeleteProgram(program)
             if (textureId != 0) GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
@@ -193,6 +240,23 @@ class OffscreenVideoOutput(
             EGL14.eglDestroySurface(display, buffer)
             EGL14.eglDestroyContext(display, context)
             EGL14.eglTerminate(display); display = EGL14.EGL_NO_DISPLAY
+        }
+    }
+
+    companion object {
+        const val DEFAULT_MAX_LONG_EDGE = 960
+        const val DEFAULT_JPEG_QUALITY = 65
+
+        internal fun encodeDimensions(
+            width: Int,
+            height: Int,
+            maxLongEdge: Int = DEFAULT_MAX_LONG_EDGE,
+        ): Pair<Int, Int> {
+            require(width > 0 && height > 0 && maxLongEdge >= 2)
+            val longEdge = maxOf(width, height)
+            val scale = if (longEdge > maxLongEdge) maxLongEdge.toDouble() / longEdge else 1.0
+            fun even(value: Double) = ((kotlin.math.round(value).toInt()).coerceAtLeast(2) / 2) * 2
+            return even(width * scale) to even(height * scale)
         }
     }
 }

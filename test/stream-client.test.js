@@ -8,12 +8,14 @@ const source = readFileSync(new URL('../common/src/main/assets/web/browser-audio
   readFileSync(new URL('../common/src/main/assets/web/app.js', import.meta.url), 'utf8')
     .replace(/^import .*browser-audio\.js';$/m, '').replaceAll('export function', 'function');
 function fixture({ storedCanvas = null, storageDisabled = false, canvasAvailable = true,
+  createImageBitmap = null, devicePixelRatio = 1,
   fullscreen = 'supported', codeDenied = false, resume = () => ({ token: 'session-token', name: 'Chrome' }) } = {}) {
   const elements = new Map(), timers = new Map(), raf = new Map(), sockets = [], peers = [], draws = [];
   const preferences = new Map(storedCanvas === null ? [] : [['wheelplay.canvasVideo', storedCanvas]]);
   const videoCallbacks = new Map();
-  const documentEvents = {}, fullscreenCalls = [];
-  let nextTimer = 0, nextFrame = 0;
+  const documentEvents = {}, windowEvents = {}, fullscreenCalls = [], objectUrls = [];
+  let nextTimer = 0, nextFrame = 0, rectCalls = 0;
+  let currentRect = { left: 0, top: 0, width: 1280, height: 720 };
   const element = id => {
     const classes = new Set();
     if (!elements.has(id)) elements.set(id, { hidden: false, value: '123456', handlers: {}, naturalWidth: 1280, naturalHeight: 720,
@@ -24,7 +26,7 @@ function fixture({ storedCanvas = null, storageDisabled = false, canvasAvailable
       cancelVideoFrameCallback(frame) { videoCallbacks.delete(frame); },
       classList: { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); }, contains: name => classes.has(name) },
       removeAttribute() {}, setAttribute() {}, setPointerCapture() {},
-      getBoundingClientRect: () => ({ left: 0, top: 0, width: 1280, height: 720 }),
+      getBoundingClientRect: () => { rectCalls++; return currentRect; },
       addEventListener(name, fn) { this.handlers[name] = fn; } });
     return elements.get(id);
   };
@@ -58,14 +60,18 @@ function fixture({ storedCanvas = null, storageDisabled = false, canvasAvailable
     if (fullscreen === 'denied') return Promise.reject(new Error('fullscreen denied'));
     enterFullscreen(); return Promise.resolve();
   };
-  const context = { document, window: { addEventListener() {},
+  const context = { document, window: { devicePixelRatio,
+    addEventListener(name, fn) { windowEvents[name] = fn; },
     localStorage: {
       getItem(key) { if (storageDisabled) throw new Error('denied'); return preferences.get(key) ?? null; },
       setItem(key, value) { if (storageDisabled) throw new Error('denied'); preferences.set(key, value); },
       removeItem(key) { preferences.delete(key); },
     },
   },
-    location: { host: 'server:8080' }, URL: { createObjectURL: () => 'blob:frame', revokeObjectURL() {} }, Date, WebSocket: Socket,
+    ...(createImageBitmap ? { createImageBitmap } : {}),
+    location: { host: 'server:8080' },
+    URL: { createObjectURL: blob => { objectUrls.push(blob); return 'blob:frame'; }, revokeObjectURL() {} },
+    Date, WebSocket: Socket,
     RTCPeerConnection: Peer, performance: { now: () => 0 },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; },
     clearTimeout(id) { timers.delete(id); }, setInterval() { return 0; }, clearInterval() {},
@@ -79,7 +85,9 @@ function fixture({ storedCanvas = null, storageDisabled = false, canvasAvailable
     },
   };
   vm.runInNewContext(source, context);
-  return { element, pending, sockets, timers, peers, draws, preferences, raf, videoCallbacks, document, fullscreenCalls,
+  return { element, pending, sockets, timers, peers, draws, preferences, raf, videoCallbacks, document, windowEvents, fullscreenCalls, objectUrls,
+    get rectCalls() { return rectCalls; },
+    setRect(rect) { currentRect = rect; },
     async connect() {
       element('connect-form').handlers.submit({ preventDefault() {} });
       await new Promise(resolve => setImmediate(resolve));
@@ -345,3 +353,118 @@ test('revocation during an active display stops retries and requires fresh pairi
   assert.equal(f.element('code-entry').hidden, false);
   assert.equal(f.preferences.has('wheelplay.browserDevice'), false);
 });
+
+test('createImageBitmap renders JPEG to Canvas without ObjectURLs, pipelines 1-frame ACK, and closes bitmaps', async () => {
+  const decoders = [], closedBitmaps = [];
+  const f = fixture({
+    createImageBitmap: payload => new Promise(resolve => {
+      decoders.push({
+        payload,
+        resolve: (width = 1280, height = 720) => {
+          const bitmap = { width, height, close() { closedBitmaps.push(payload); } };
+          resolve(bitmap);
+        },
+      });
+    }),
+  });
+  const ws = await f.connect();
+  // Frame 1 starts decoding immediately and sends ACK right away so network transfer overlaps decode.
+  ws.onmessage({ data: { frame: 1 } });
+  assert.equal(decoders.length, 1);
+  assert.equal(ws.sent.filter(m => m.type === 'ack').length, 1);
+  assert.equal(f.objectUrls.length, 0);
+
+  // Frame 2 and Frame 3 arrive while Frame 1 is still decoding: only the latest is kept in the
+  // single pending slot, and no extra ACK is sent until Frame 1 finishes decoding.
+  ws.onmessage({ data: { frame: 2 } });
+  ws.onmessage({ data: { frame: 3 } });
+  assert.equal(decoders.length, 1);
+  assert.equal(ws.sent.filter(m => m.type === 'ack').length, 1);
+
+  decoders[0].resolve(1600, 900);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.draws.length, 1);
+  assert.equal(f.element('video-canvas').hidden, false);
+  assert.equal(f.element('video-canvas').width, 1600);
+  assert.equal(f.element('video-canvas').height, 900);
+  assert.equal(f.element('screen').hidden, true);
+  assert.deepEqual(closedBitmaps, [{ frame: 1 }]);
+
+  // Completing Frame 1 immediately starts Frame 3 and sends the next pipelined ACK.
+  assert.equal(decoders.length, 2);
+  assert.deepEqual(decoders[1].payload, { frame: 3 });
+  assert.equal(ws.sent.filter(m => m.type === 'ack').length, 2);
+
+  // Frame 4 arrives while Frame 3 is decoding, then both Frame 3 and Frame 4 resolve within the
+  // same VSync window: Frame 3 is superseded and closed without a redundant drawImage, and only
+  // Frame 4 is painted on the next VSync tick.
+  ws.onmessage({ data: { frame: 4 } });
+  decoders[1].resolve(1600, 900);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.draws.length, 1, 'Second decode in the same VSync must wait for rAF');
+  assert.equal(decoders.length, 3);
+  decoders[2].resolve(1600, 900);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.draws.length, 1);
+  assert.deepEqual(closedBitmaps, [{ frame: 1 }, { frame: 3 }]);
+  f.flushMoves();
+  assert.equal(f.draws.length, 2);
+  assert.deepEqual(closedBitmaps, [{ frame: 1 }, { frame: 3 }, { frame: 4 }]);
+  assert.equal(f.objectUrls.length, 0);
+});
+
+test('in-flight createImageBitmap closes its bitmap and does not draw after WebRTC handover or disconnect', async () => {
+  const decoders = [], closed = [];
+  const f = fixture({
+    createImageBitmap: payload => new Promise(resolve => {
+      decoders.push(() => resolve({ width: 1280, height: 720, close() { closed.push(payload.id); } }));
+    }),
+  });
+  const ws = await f.connect();
+  ws.onmessage({ data: { id: 'before-rtc' } });
+  await f.offer(ws);
+  assert.equal(f.element('video').hidden, false);
+  assert.equal(f.element('video-canvas').hidden, true);
+  decoders[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(closed, ['before-rtc']);
+  assert.equal(f.draws.length, 0);
+  assert.equal(f.element('video-canvas').hidden, true);
+
+  ws.close();
+  const next = await f.connect();
+  next.onmessage({ data: { id: 'before-close' } });
+  next.close();
+  decoders[1]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(closed, ['before-rtc', 'before-close']);
+  assert.equal(f.draws.length, 0);
+});
+
+test('touch drags reuse cached bounding rect and invalidate on resize or fullscreen change', async () => {
+  const f = fixture(), ws = await f.connect(); f.frame(ws);
+  const beforeDrag = f.rectCalls;
+  f.pointer('pointerdown', 100, 'touch-surface');
+  for (let x = 110; x <= 300; x += 10) f.pointer('pointermove', x, 'touch-surface');
+  f.flushMoves();
+  f.pointer('pointerup', 300, 'touch-surface');
+  assert.equal(f.rectCalls - beforeDrag, 1, 'Drag must query getBoundingClientRect only once');
+
+  f.setRect({ left: 0, top: 0, width: 640, height: 360 });
+  f.windowEvents.resize();
+  const beforeSecondDrag = f.rectCalls;
+  f.pointer('pointerdown', 320, 'touch-surface');
+  f.pointer('pointerup', 320, 'touch-surface');
+  assert.equal(f.rectCalls - beforeSecondDrag, 1, 'Resize must invalidate cached bounding rect');
+});
+
+test('high-DPR car displays cap reported viewport long edge at 1280 while preserving aspect ratio', async () => {
+  const f = fixture({ devicePixelRatio: 2 }), ws = await f.connect();
+  f.setRect({ left: 0, top: 0, width: 1200, height: 880 });
+  f.windowEvents.resize();
+  const viewportTimer = [...f.timers.values()].find(t => t.delay === 180);
+  assert.ok(viewportTimer);
+  viewportTimer.fn();
+  assert.deepEqual(ws.sent.find(m => m.type === 'viewport'), { type: 'viewport', width: 1280, height: 938 });
+});
+

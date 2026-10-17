@@ -52,26 +52,29 @@ export function createControlOutbox(socket, {
       cancel(timer); timer = null; blockedSince = null;
     }
   };
+  const ACK_JSON = '{"type":"ack"}', PING_JSON = '{"type":"ping"}';
   return {
     send(data, kind = 'edge') {
       if (closed || socket.readyState !== 1) return false;
-      const json = JSON.stringify(data);
-      if (data.type === 'ack') ack = json;
-      else if (data.type === 'audio-ack') audioAck = json;
-      else if (data.type === 'audio-ready') audioReady = json;
-      else if (data.type === 'ping') ping = json;
-      else if (data.type === 'rtc-feedback') feedback = json;
-      else if (data.type === 'viewport') viewport = json;
-      else if (data.type === 'touch') {
-        const tail = touches[touches.length - 1];
-        // Only consecutive moves may be replaced; never cross a down/up/release boundary.
-        if (kind === 'move' && tail && tail.kind === 'move') tail.json = json;
-        else if (touches.length < 64) touches.push({ kind, json });
-        else { fail(); return false; }
-      } else if (['rtc-start', 'rtc-answer', 'rtc-ready', 'rtc-fallback', 'phone-connect'].includes(data.type)) {
-        if (signals.length >= 8 || json.length > 32768) { fail(); return false; }
-        signals.push(json);
-      } else return false;
+      if (data.type === 'ack') ack = ACK_JSON;
+      else if (data.type === 'ping') ping = PING_JSON;
+      else {
+        const json = JSON.stringify(data);
+        if (data.type === 'audio-ack') audioAck = json;
+        else if (data.type === 'audio-ready') audioReady = json;
+        else if (data.type === 'rtc-feedback') feedback = json;
+        else if (data.type === 'viewport') viewport = json;
+        else if (data.type === 'touch') {
+          const tail = touches[touches.length - 1];
+          // Only consecutive moves may be replaced; never cross a down/up/release boundary.
+          if (kind === 'move' && tail && tail.kind === 'move') tail.json = json;
+          else if (touches.length < 64) touches.push({ kind, json });
+          else { fail(); return false; }
+        } else if (['rtc-start', 'rtc-answer', 'rtc-ready', 'rtc-fallback', 'phone-connect'].includes(data.type)) {
+          if (signals.length >= 8 || json.length > 32768) { fail(); return false; }
+          signals.push(json);
+        } else return false;
+      }
       flush();
       return !closed;
     },
@@ -87,19 +90,20 @@ export function createVideoCanvasRenderer(video, canvas, {
   requestFrame = callback => requestAnimationFrame(callback), cancelFrame = id => cancelAnimationFrame(id),
   now = () => performance.now(),
 } = {}) {
-  let context = null, running = false, generation = 0, videoCallback = null, animationCallback = null;
+  let context = null, running = false, ownsCanvas = false, generation = 0, videoCallback = null, animationCallback = null;
   let lastVideoCallbackAt = 0, lastFrameKey = null;
   function prepare() {
     video.classList.toggle('offscreen-video', true);
     video.hidden = false;
   }
   function stop() {
-    running = false; generation++;
+    const resetCanvas = ownsCanvas;
+    running = false; ownsCanvas = false; generation++;
     if (videoCallback !== null && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(videoCallback);
     if (animationCallback !== null) cancelFrame(animationCallback);
     videoCallback = animationCallback = null; context = null; lastFrameKey = null;
     video.hidden = true; video.classList.toggle('offscreen-video', false);
-    canvas.hidden = true; canvas.width = canvas.height = 0;
+    if (resetCanvas) { canvas.hidden = true; canvas.width = canvas.height = 0; }
   }
   function fail(error) { stop(); onError(error); }
   function draw(metadata = null, stalled = false) {
@@ -122,7 +126,7 @@ export function createVideoCanvasRenderer(video, canvas, {
     } catch (error) { fail(error); }
   }
   function start() {
-    stop(); prepare();
+    stop(); prepare(); ownsCanvas = true;
     try {
       context = canvas.getContext('2d', { alpha: false });
       if (!context) throw new Error('Canvas 2D unavailable');
@@ -534,11 +538,23 @@ if (typeof document !== 'undefined') {
       $('tls-error').textContent = info.error || '';
     } catch (_) { $('tls-error').textContent = '证书信息暂时无法读取'; }
   });
+  let cachedDisplayRect = null, cachedRectSurface = null;
+  function invalidateDisplayRect() { cachedDisplayRect = null; cachedRectSurface = null; }
+  function getSurfaceRect(surface) {
+    if (cachedRectSurface !== surface || !cachedDisplayRect || cachedDisplayRect.width <= 0 || cachedDisplayRect.height <= 0) {
+      cachedDisplayRect = surface.getBoundingClientRect();
+      cachedRectSurface = surface;
+    }
+    return cachedDisplayRect;
+  }
   function scheduleViewportReport() {
+    invalidateDisplayRect();
     clearTimeout(viewportReportTimer);
     viewportReportTimer = setTimeout(() => {
       if (!socket || socket.readyState !== WebSocket.OPEN || display.hidden) return;
-      const rect = display.getBoundingClientRect(), scale = window.devicePixelRatio || 1;
+      const rect = display.getBoundingClientRect(), rawScale = window.devicePixelRatio || 1;
+      const maxEdge = Math.max(rect.width, rect.height) * rawScale;
+      const scale = maxEdge > 1280 ? rawScale * (1280 / maxEdge) : rawScale;
       const width = Math.round(rect.width * scale / 2) * 2;
       const height = Math.round(rect.height * scale / 2) * 2;
       if (width < 320 || height < 240) return;
@@ -553,6 +569,8 @@ if (typeof document !== 'undefined') {
   function cancelMove() { moveGeneration++; movePending = false; }
   function contacts() { return [...pointers.values()].map(p => ({ id: p.id, x: p.x, y: p.y, down: true })); }
   function release() { cancelMove(); pointers.clear(); send({ type: 'touch', contacts: [] }); }
+  const statusElement = $('status');
+  const waitingElement = $('waiting');
   // Called once per decoded JPEG frame, so it must not touch the DOM while the state is unchanged.
   // Both JPEG buffers carry the class so a swap never reveals an unstyled element.
   function setLive(value) {
@@ -563,21 +581,131 @@ if (typeof document !== 'undefined') {
     video.classList.toggle('stale', !value);
     canvas.classList.toggle('stale', !value);
     touchSurface.classList.toggle('stale', !value);
-    $('waiting').hidden = value;
+    waitingElement.hidden = value;
     if (!value && pointers.size) release();
   }
   // Routine callers repeat the same text every frame or every status message; a held message
   // outranks them until it expires so a one-shot event stays readable.
-  let statusHeldUntil = 0;
+  let statusHeldUntil = 0, lastStatusText = null;
   function setStatus(text, holdMillis = 0) {
+    if (holdMillis === 0 && statusHeldUntil === 0 && text === lastStatusText && statusElement.textContent === text) return;
     const now = Date.now();
     if (now < statusHeldUntil && holdMillis === 0) return;
-    const element = $('status');
     // Comparing against the live DOM keeps this correct even when another path wrote directly.
-    if (element.textContent !== text) element.textContent = text;
+    if (statusElement.textContent !== text) statusElement.textContent = text;
+    lastStatusText = text;
     statusHeldUntil = holdMillis > 0 ? now + holdMillis : 0;
   }
+  let jpegContext = null, jpegDecoding = false, pendingJpeg = null, jpegGeneration = 0, jpegRendered = false;
+  let jpegRaf = null, stagedBitmap = null, stagedSocket = null;
+  function closeBitmap(bitmap) {
+    if (bitmap && typeof bitmap.close === 'function') bitmap.close();
+  }
+  function paintJpegBitmap(ws, bitmap) {
+    const frameWidth = bitmap.width || width, frameHeight = bitmap.height || height;
+    if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
+      canvas.width = frameWidth;
+      canvas.height = frameHeight;
+      jpegContext.imageSmoothingEnabled = false;
+    }
+    jpegContext.drawImage(bitmap, 0, 0, frameWidth, frameHeight);
+    closeBitmap(bitmap);
+    canvas.hidden = false;
+    screen.hidden = true;
+    spare.hidden = true;
+    jpegRendered = true;
+    lastFrame = Date.now();
+    width = frameWidth;
+    height = frameHeight;
+    setLive(true);
+    setStatus('JPEG · 触控已连接');
+  }
+  function scheduleJpegVsyncGate() {
+    if (jpegRaf !== null || typeof requestAnimationFrame !== 'function') return;
+    const rafToken = jpegGeneration;
+    jpegRaf = requestAnimationFrame(() => {
+      jpegRaf = null;
+      if (rafToken !== jpegGeneration || !stagedBitmap) return;
+      const nextBitmap = stagedBitmap, nextWs = stagedSocket;
+      stagedBitmap = null;
+      stagedSocket = null;
+      if (socket !== nextWs || nextWs.readyState !== WebSocket.OPEN || (rtc && rtc.active)) {
+        closeBitmap(nextBitmap);
+        return;
+      }
+      try {
+        paintJpegBitmap(nextWs, nextBitmap);
+        scheduleJpegVsyncGate();
+      } catch (_) {
+        closeBitmap(nextBitmap);
+        stopJpegPipeline(true);
+        if (socket === nextWs) nextWs.close();
+      }
+    });
+  }
+  function stopJpegPipeline(hideSurface = false) {
+    jpegGeneration++;
+    jpegDecoding = false;
+    pendingJpeg = null;
+    if (jpegRaf !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(jpegRaf);
+    jpegRaf = null;
+    closeBitmap(stagedBitmap);
+    stagedBitmap = null;
+    stagedSocket = null;
+    if (hideSurface && jpegRendered) {
+      jpegRendered = false;
+      canvas.hidden = true;
+      canvas.width = canvas.height = 0;
+      jpegContext = null;
+    }
+  }
+  function decodeJpegCanvas(ws, payload) {
+    jpegDecoding = true;
+    const token = jpegGeneration;
+    // 1-Frame Pipelining: acknowledge as soon as the decoder takes the frame while the pending
+    // slot is empty, overlapping network delivery of the next frame with off-thread decoding.
+    send({ type: 'ack' });
+    const source = payload instanceof ArrayBuffer && typeof Blob !== 'undefined' ? new Blob([payload], { type: 'image/jpeg' }) : payload;
+    Promise.resolve(createImageBitmap(source)).then(bitmap => {
+      if (token !== jpegGeneration || socket !== ws || ws.readyState !== WebSocket.OPEN || (rtc && rtc.active)) {
+        closeBitmap(bitmap);
+        if (pendingJpeg !== null && socket === ws && ws.readyState === WebSocket.OPEN) send({ type: 'ack' });
+        jpegDecoding = false;
+        pendingJpeg = null;
+        return;
+      }
+      try {
+        if (jpegRaf !== null && typeof requestAnimationFrame === 'function') {
+          closeBitmap(stagedBitmap);
+          stagedBitmap = bitmap;
+          stagedSocket = ws;
+        } else {
+          paintJpegBitmap(ws, bitmap);
+          scheduleJpegVsyncGate();
+        }
+      } catch (_) {
+        closeBitmap(bitmap);
+        stopJpegPipeline(true);
+        if (socket === ws) ws.close();
+        return;
+      }
+      if (pendingJpeg !== null && socket === ws && ws.readyState === WebSocket.OPEN && !(rtc && rtc.active)) {
+        const next = pendingJpeg;
+        pendingJpeg = null;
+        decodeJpegCanvas(ws, next);
+      } else {
+        jpegDecoding = false;
+        pendingJpeg = null;
+      }
+    }, () => {
+      if (token !== jpegGeneration || socket !== ws) return;
+      stopJpegPipeline(true);
+      ws.close();
+    });
+  }
   function cleanupImage() {
+    stopJpegPipeline(true);
+    jpegContext = null;
     for (const buffer of [screen, spare]) {
       buffer.onload = null; buffer.onerror = null;
       buffer.removeAttribute('src'); buffer.hidden = true;
@@ -589,7 +717,14 @@ if (typeof document !== 'undefined') {
     if (rtc) rtc.close(); rtc = null; rtcRequested = false; rtcFps = null;
     canvasRenderer.stop();
     performanceStats.source = performanceStats.transport = performanceStats.receiver = null;
-    screen.hidden = !(screen.complete && screen.naturalWidth > 0); video.hidden = true;
+    if (jpegRendered) {
+      canvas.hidden = false;
+      screen.hidden = true;
+    } else {
+      canvas.hidden = true;
+      screen.hidden = !(screen.complete && screen.naturalWidth > 0);
+    }
+    video.hidden = true;
   }
   function exitLaunchFullscreen() {
     try { Promise.resolve(document.exitFullscreen()).catch(() => {}); } catch (_) {}
@@ -623,6 +758,7 @@ if (typeof document !== 'undefined') {
     cleanupRtc(); cleanupImage(); setLive(false);
     browserAudio.close(); $('audio-message').hidden = true;
     $('topbar').hidden = false; $('pairing').hidden = false; $('display').hidden = true;
+    invalidateDisplayRect();
     $('disconnect').hidden = true; $('connect').disabled = false;
     $('status').textContent = '已断开';
     if (refreshQr) initializePairing();
@@ -650,17 +786,25 @@ if (typeof document !== 'undefined') {
       cleanupRtc();
       rtc = createRtcReceiver(video, { send,
         onTrack: () => { if (useCanvas) canvasRenderer.prepare(); },
-        onReset: () => canvasRenderer.stop(),
+        onReset: () => { canvasRenderer.stop(); if (!jpegRendered) canvas.hidden = true; },
         onReady: () => {
           if (socket !== ws) return;
-          if (useCanvas) { canvasRenderer.start(); return; }
-          screen.hidden = true; video.hidden = false;
+          if (useCanvas) { stopJpegPipeline(false); jpegRendered = false; jpegContext = null; canvasRenderer.start(); return; }
+          stopJpegPipeline(true);
+          canvas.hidden = true; screen.hidden = true; video.hidden = false;
           width = video.videoWidth; height = video.videoHeight; setLive(true);
         },
         onStop: () => {
           if (socket !== ws) return;
-          screen.hidden = !(screen.complete && screen.naturalWidth > 0); video.hidden = true; rtcFps = null;
-          setLive(Boolean(lastFrame && screen.naturalWidth));
+          if (jpegRendered) {
+            canvas.hidden = false;
+            screen.hidden = true;
+          } else {
+            canvas.hidden = true;
+            screen.hidden = !(screen.complete && screen.naturalWidth > 0);
+          }
+          video.hidden = true; rtcFps = null;
+          setLive(Boolean(lastFrame && (jpegRendered || screen.naturalWidth)));
         },
         onStats: (fps, metrics) => { rtcFps = fps === null ? null : Math.round(fps); performanceStats.receiver = metrics; },
       });
@@ -708,7 +852,7 @@ if (typeof document !== 'undefined') {
           }
           // The server resets availability when the iPhone starts a new video configuration.
           if (!data.rtcAvailable) rtcRequested = false;
-          setLive(Boolean(data.streaming && (rtc.active || lastFrame && screen.naturalWidth)));
+          setLive(Boolean(data.streaming && (rtc.active || lastFrame && (jpegRendered || screen.naturalWidth))));
           const transport = rtc.active ? `${rtc.codec === 'H265' ? 'HEVC' : 'H.264'} / WebRTC${useCanvas ? ' / Canvas' : ''}${rtcFps === null ? '' : ` · ${rtcFps} fps`}` : `JPEG${data.fallback ? ' · 已回退' : ''}`;
           // A fallback is a one-shot event that the next JPEG frame would otherwise overwrite
           // within one frame interval, so hold it long enough to be read.
@@ -722,11 +866,28 @@ if (typeof document !== 'undefined') {
       }
       if (browserAudio.receive(event.data)) return;
       if (rtc && rtc.active) { send({ type: 'ack' }); return; }
-      // Load into the idle buffer and swap only once it has loaded, so the visible element always
-      // holds a paintable frame. Pointing the one visible element at a new blob blanks it for the
-      // whole fetch and decode, which is the flicker seen at frame rate on car hardware.
+      if (typeof createImageBitmap === 'function') {
+        if (!jpegContext) {
+          try {
+            jpegContext = canvas.getContext('2d', { alpha: false, desynchronized: true }) || canvas.getContext('2d', { alpha: false });
+          } catch (_) {
+            try { jpegContext = canvas.getContext('2d'); } catch (_) { jpegContext = null; }
+          }
+          if (jpegContext) jpegContext.imageSmoothingEnabled = false;
+        }
+        if (jpegContext) {
+          if (jpegDecoding) {
+            pendingJpeg = event.data;
+            return;
+          }
+          decodeJpegCanvas(ws, event.data);
+          return;
+        }
+      }
+      // Fallback for browsers without createImageBitmap: load into the idle buffer and swap only
+      // once it has loaded, so the visible element always holds a paintable frame.
       const displayedUrl = objectUrl;
-      const nextUrl = URL.createObjectURL(event.data instanceof ArrayBuffer ? new Blob([event.data], { type: 'image/jpeg' }) : event.data);
+      const nextUrl = URL.createObjectURL(event.data instanceof ArrayBuffer && typeof Blob !== 'undefined' ? new Blob([event.data], { type: 'image/jpeg' }) : event.data);
       objectUrl = nextUrl;
       const target = spare;
       target.onload = () => {
@@ -839,11 +1000,11 @@ if (typeof document !== 'undefined') {
     scheduleViewportReport();
   });
   // A separate layer prevents Android Chrome's native video gestures cancelling drags.
-  for (const surface of [screen, video, canvas, touchSurface]) {
+  for (const surface of [screen, spare, video, canvas, touchSurface]) {
   surface.addEventListener('contextmenu', event => event.preventDefault());
   surface.addEventListener('pointerdown', event => {
     if (!live || pointers.size >= 2 || (event.pointerType === 'mouse' && event.button !== 0)) return;
-    const point = mapPoint(event.clientX, event.clientY, surface.getBoundingClientRect(), width, height);
+    const point = mapPoint(event.clientX, event.clientY, getSurfaceRect(surface), width, height);
     if (!point) return;
     event.preventDefault();
     const id = [...pointers.values()].some(p => p.id === 0) ? 1 : 0;
@@ -854,7 +1015,7 @@ if (typeof document !== 'undefined') {
   });
   surface.addEventListener('pointermove', event => {
     const p = pointers.get(event.pointerId); if (!p) return;
-    const point = mapPoint(event.clientX, event.clientY, surface.getBoundingClientRect(), width, height, true);
+    const point = mapPoint(event.clientX, event.clientY, getSurfaceRect(surface), width, height, true);
     if (!point) return;
     Object.assign(p, point);
     if (!movePending) {

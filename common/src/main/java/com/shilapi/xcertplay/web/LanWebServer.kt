@@ -24,8 +24,14 @@ internal class LanWebServer(private val context: Context, private val code: Stri
     private val devices = WebSession.rememberedBrowsers(context)
     private val enrolled = mutableMapOf<String, RememberedBrowsers.Credential>()
     val hasViewer get() = viewer != null
+    val jpegReady get() = viewer?.jpegReady == true
     fun frameAvailable() { viewer?.frameAvailable() }
     fun disconnectViewer() { viewer?.disconnect("设备已移除") }
+
+    override fun createClientHandler(finalAccept: java.net.Socket, inputStream: java.io.InputStream): ClientHandler {
+        runCatching { finalAccept.tcpNoDelay = true }
+        return super.createClientHandler(finalAccept, inputStream)
+    }
 
     fun disconnectUnauthorized() {
         viewer?.let { if (!it.authorized()) it.disconnect("设备已移除或配对已过期") }
@@ -221,10 +227,13 @@ internal class LanWebServer(private val context: Context, private val code: Stri
         fun frameAvailable() = sender.frameAvailable()
         private val ended = AtomicBoolean(false)
         private val closing = AtomicBoolean(false)
+        val jpegReady: Boolean
+            get() = !ended.get() && !closing.get() && WebSession.videoSource?.jpegNeeded != false && sender.readyForFrame
         private val sender = WebStreamSender(
             latestFrame = { if (viewer === this && !closing.get() && WebSession.videoSource?.jpegNeeded != false) WebSession.frame else null },
             write = { super.sendFrame(it) },
             onFailure = { disconnect("串流连接中断") },
+            onReadyForFrame = { WebSession.notifyJpegDemand() },
         )
         private val rtcLock = Any()
         private var rtcSource: WebVideoSource? = null
@@ -250,6 +259,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                 reply(WebStreamSender.Control.RTC, JSONObject().put("type", "rtc-stop").put("id", rtcId).toString())
             }
             sender.frameAvailable()
+            WebSession.notifyJpegDemand()
         }
 
         private fun startRtc() = synchronized(rtcLock) {

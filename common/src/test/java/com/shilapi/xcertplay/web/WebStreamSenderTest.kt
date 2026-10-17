@@ -34,16 +34,20 @@ class WebStreamSenderTest {
         val executor = ManualExecutor()
         var latest: WebSession.Frame? = null
         val sent = mutableListOf<WebSocketFrame>()
-        val sender = WebStreamSender({ latest }, { sent.add(it) }, { fail() }, executor, { 100 })
+        var readyNotifications = 0
+        val sender = WebStreamSender({ latest }, { sent.add(it) }, { fail() }, executor, { 100 }, { readyNotifications++ })
         try {
+            assertTrue(sender.readyForFrame)
             sender.frameAvailable(); assertTrue(executor.tasks.isEmpty())
-            latest = frame(1); sender.frameAvailable(); executor.runNext()
+            latest = frame(1); assertFalse("Unsent frame queued means not ready for another encode", sender.readyForFrame)
+            sender.frameAvailable(); executor.runNext()
+            assertFalse("In-flight frame waiting for ACK means not ready for another encode", sender.readyForFrame)
             assertArrayEquals(byteArrayOf(1), sent.single().binaryPayload)
             for (id in 2L..100L) { latest = frame(id); sender.frameAvailable() }
             assertTrue("No polling or per-frame tasks while ACK is outstanding", executor.tasks.isEmpty())
-            sender.acknowledge(); assertEquals(1, executor.tasks.size); executor.runNext()
+            sender.acknowledge(); assertEquals(0, readyNotifications); assertEquals(1, executor.tasks.size); executor.runNext()
             assertArrayEquals(byteArrayOf(100), sent.last().binaryPayload)
-            sender.acknowledge(); assertTrue(executor.tasks.isEmpty())
+            sender.acknowledge(); assertEquals(1, readyNotifications); assertTrue(sender.readyForFrame); assertTrue(executor.tasks.isEmpty())
             latest = frame(101); sender.frameAvailable(); executor.runNext()
             assertEquals(3, sent.size)
             assertFalse(sender.frameStalled(6100)); assertTrue(sender.frameStalled(6101))
