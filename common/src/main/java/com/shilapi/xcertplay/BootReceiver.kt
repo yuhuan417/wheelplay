@@ -28,6 +28,7 @@ class BootReceiver : BroadcastReceiver() {
             }
             BluetoothDevice.ACTION_ACL_CONNECTED -> {
                 if (!DiPlayPreferences.autoConnect(context)) return
+                if (CarPlayBackgroundSession.isUnpluggedOnBattery(context)) return
                 if (CarPlayBackgroundSession.active) return
                 val targetAddress = DiPlayPreferences.phoneAddress(context)
                 if (targetAddress.isNullOrBlank()) return

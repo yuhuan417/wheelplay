@@ -2968,6 +2968,11 @@ class CarPlayHostActivity : ComponentActivity() {
             setConnectionStage("认证资源未就绪，请到设置 → CarPlay 认证资源导入文件或 DiPlay APK")
             return
         }
+        if (wirelessEnabled && CarPlayBackgroundSession.isUnpluggedOnBattery(this)) {
+            enterPowerSaveStandby("未检测到随车供电，已进入省电待机")
+            showDiPlayHome("service")
+            return
+        }
         val controllerGeneration = restartGeneration
         // The settings page can change branding while this activity remains in the back stack.
         simulatedManufacturerName = AirPlayPersistence.loadSimulatedManufacturerName(this)
@@ -3157,23 +3162,20 @@ class CarPlayHostActivity : ComponentActivity() {
         startCarPlay(size)
     }
 
-    private fun isExternalPowerConnected(): Boolean {
-        val status = runCatching {
-            registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        }.getOrNull()
-        val plugged = status?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) ?: 0
-        return plugged != 0
-    }
-
     private fun maxWirelessReconnectAttempts(): Int =
-        if (isExternalPowerConnected()) MAX_CHARGING_RECONNECT_ATTEMPTS else MAX_BATTERY_RECONNECT_ATTEMPTS
+        if (CarPlayBackgroundSession.isUnpluggedOnBattery(this)) 0 else MAX_CHARGING_RECONNECT_ATTEMPTS
 
     private fun reconnectAfterLoss(reason: String) {
         if (!CarPlayBackgroundSession.isOwner(this)) return
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress) return
         if (reconnectScheduled) return
         if (wirelessEnabled && reconnectAttempts >= maxWirelessReconnectAttempts()) {
-            enterPowerSaveStandby("iPhone 不在附近，已进入蓝牙待机省电模式")
+            val standbyReason = if (CarPlayBackgroundSession.isUnpluggedOnBattery(this)) {
+                "随车断电，已进入省电待机"
+            } else {
+                "iPhone 不在附近，已进入蓝牙待机省电模式"
+            }
+            enterPowerSaveStandby(standbyReason)
             return
         }
         reconnectScheduled = true
@@ -3203,10 +3205,11 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun enterPowerSaveStandby(reason: String) {
-        if (!CarPlayBackgroundSession.isOwner(this)) return
+        if (CarPlayBackgroundSession.hasSession() && !CarPlayBackgroundSession.isOwner(this)) return
         if (shuttingDown.get() || menuOpen) return
         reconnectScheduled = false
         reconnectAttempts = 0
+        activeAirPlaySession = null
         activeScreenStreamTypes.clear()
         WebSession.videoActive = false
         appendLog(reason)
@@ -3627,6 +3630,7 @@ class CarPlayHostActivity : ComponentActivity() {
 internal object CarPlayBackgroundSession {
     @Volatile var active = false
     @Volatile var standby = false
+    @Volatile var powerDisconnected = false
     private var stopAction: (((() -> Unit)) -> Unit)? = null
     private var wakeAction: ((String) -> Unit)? = null
     private var standbyAction: ((String) -> Unit)? = null
@@ -3635,6 +3639,18 @@ internal object CarPlayBackgroundSession {
     @Synchronized fun isOwner(candidate: Any): Boolean = owner === candidate
     @Synchronized fun hasSession(): Boolean = stopAction != null || stopping
     private val stopWaiters = mutableListOf<() -> Unit>()
+
+    fun isUnpluggedOnBattery(context: android.content.Context): Boolean {
+        if (powerDisconnected) return true
+        val status = runCatching {
+            context.applicationContext.registerReceiver(
+                null,
+                android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+            )
+        }.getOrNull() ?: return false
+        if (!status.hasExtra(android.os.BatteryManager.EXTRA_PLUGGED)) return false
+        return status.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, -1) == 0
+    }
 
     fun wake(trigger: String): Boolean {
         val action = synchronized(this) { wakeAction } ?: return false
@@ -3745,6 +3761,7 @@ internal object CarPlayBackgroundSession {
                 standbyAction = null
                 owner = null
                 standby = false
+                powerDisconnected = false
             }
             active = false
             width = 0

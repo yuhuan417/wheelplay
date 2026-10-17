@@ -273,6 +273,7 @@ class DiPlayActivity : AppCompatActivity() {
             if (setupError == null && !DiPlayBootstrap.importing && selectedPrivateKey == null &&
                 intent.action != Intent.ACTION_SEND && intent.action != Intent.ACTION_VIEW &&
                 !CarPlayBackgroundSession.hasSession() &&
+                !CarPlayBackgroundSession.isUnpluggedOnBattery(this) &&
                 DiPlayPreferences.autoConnect(this) && intent.getStringExtra("page") == null) {
                 handler.post { connect(AirPlayPersistence.loadWirelessEnabled(this)) }
             }

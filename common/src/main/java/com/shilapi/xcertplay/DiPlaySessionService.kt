@@ -43,6 +43,7 @@ class DiPlaySessionService : Service() {
     private var destroyed = false
     private var activationBlocked = false
     private var standby = false
+    @Volatile private var radioPowerOffVerified: Boolean? = null
     private var receiverRegistered = false
     private var currentState = NowPlayingState()
     private var currentSession: MediaSession? = null
@@ -53,24 +54,25 @@ class DiPlaySessionService : Service() {
             if (destroyed || activationBlocked) return
             when (intent.action) {
                 Intent.ACTION_POWER_CONNECTED -> {
+                    CarPlayBackgroundSession.powerDisconnected = false
                     if (standby || !WebSession.running || !CarPlayBackgroundSession.active) {
                         wakeFromStandby("随车通电")
                     }
                 }
                 Intent.ACTION_POWER_DISCONNECTED -> {
-                    if (!CarPlayBackgroundSession.active) {
-                        if (!CarPlayBackgroundSession.requestStandby("随车断电，已进入省电待机")) {
-                            enterStandby()
-                        }
-                    }
+                    CarPlayBackgroundSession.powerDisconnected = true
+                    CarPlayBackgroundSession.requestStandby("随车断电，已进入省电待机")
+                    enterStandby()
                 }
                 BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                    if (CarPlayBackgroundSession.isUnpluggedOnBattery(context)) return
                     val device = extractBluetoothDevice(intent)
                     if (matchesTargetIphone(device) && !CarPlayBackgroundSession.active) {
                         wakeFromStandby("iPhone 蓝牙已连接")
                     }
                 }
                 BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED -> {
+                    if (CarPlayBackgroundSession.isUnpluggedOnBattery(context)) return
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_CONNECTION_STATE, -1)
                     if (state == BluetoothAdapter.STATE_CONNECTED) {
                         val device = extractBluetoothDevice(intent)
@@ -80,6 +82,7 @@ class DiPlaySessionService : Service() {
                     }
                 }
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                    if (CarPlayBackgroundSession.isUnpluggedOnBattery(context)) return
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)
                     if (state == BluetoothAdapter.STATE_ON &&
                         (standby || CarPlayBackgroundSession.standby) &&
@@ -94,9 +97,12 @@ class DiPlaySessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        if (com.shilapi.xcertplay.web.TeslaHttpCompatibility.config(this).let {
+        val teslaRootMode = com.shilapi.xcertplay.web.TeslaHttpCompatibility.config(this).let {
             it.enabled && it.mode == com.shilapi.xcertplay.network.TeslaHttpMode.ROOT
-        }) RootAccess.checkOnStartup()
+        }
+        // Wireless standby cuts the radio with `su`; ask for the grant while the user can see the
+        // Magisk prompt instead of failing silently when the car cuts power.
+        if (teslaRootMode || AirPlayPersistence.loadWirelessEnabled(this)) RootAccess.checkOnStartup()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "CarPlay 服务", NotificationManager.IMPORTANCE_LOW))
         media = CarPlayMediaSessionBridge(this) { state, session, artwork ->
@@ -160,7 +166,13 @@ class DiPlaySessionService : Service() {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_WAKE) {
+            CarPlayBackgroundSession.powerDisconnected = false
             wakeFromStandby("手动唤醒")
+            return START_NOT_STICKY
+        }
+        if (CarPlayBackgroundSession.isUnpluggedOnBattery(this)) {
+            CarPlayBackgroundSession.requestStandby("未检测到随车供电，已进入省电待机")
+            enterStandby()
             return START_NOT_STICKY
         }
         activateWebAndLocks()
@@ -170,6 +182,9 @@ class DiPlaySessionService : Service() {
     @SuppressLint("WakelockTimeout")
     private fun activateWebAndLocks() {
         standby = false
+        radioPowerOffVerified = null
+        CarPlayBackgroundSession.standby = false
+        RootRadioPower.wakeFromStandby(this)
         runWebAction {
             if (!destroyed) WebSession.start(this)
             updateNotification()
@@ -202,8 +217,15 @@ class DiPlaySessionService : Service() {
     private fun enterStandby() {
         if (destroyed || activationBlocked) return
         standby = true
+        CarPlayBackgroundSession.standby = true
+        CarPlayBackgroundSession.active = false
         runWebAction { WebSession.stop() }
         releaseLocks()
+        radioPowerOffVerified = null
+        RootRadioPower.enterStandby(this) { verified ->
+            radioPowerOffVerified = verified
+            main.post { if (!destroyed) updateNotification() }
+        }
         updateNotification()
     }
 
@@ -306,6 +328,8 @@ class DiPlaySessionService : Service() {
             val port = if (WebSession.running) WebSession.httpPort else WebListenSettings.httpPort(this)
             val statusText = when {
                 WebSession.running -> "局域网串流服务运行中 · $port"
+                standby && radioPowerOffVerified == false ->
+                    "待机省电中 · 未能关闭 Wi-Fi/热点，请检查 Root 授权"
                 standby -> "待机省电中 · 等待 iPhone 蓝牙或随车通电"
                 else -> "正在准备串流服务…"
             }
