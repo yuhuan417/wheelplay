@@ -47,7 +47,7 @@ function fixture({ status = () => ok({ state: 'pending' }), stored = null, resum
     },
   };
   vm.runInNewContext(source, context);
-  return { element, sockets, requests, preferences, windowEvents,
+  return { element, sockets, requests, preferences, windowEvents, timers,
     submit: () => element('connect-form').handlers.submit({ preventDefault() {} }),
     poll: () => [...timers.values()].find(t => t.delay === 1000).fn() };
 }
@@ -91,15 +91,14 @@ test('expired QR is removed while manual pairing remains available', async () =>
   f.submit(); await flush(); assert.equal(f.sockets.length, 1);
 });
 
-test('reopening a remembered browser authenticates without QR or stream until launch', async () => {
+test('reopening a remembered browser authenticates without QR and automatically launches stream', async () => {
   const f = fixture({ stored: savedDevice }); await flush();
   assert.deepEqual(f.requests.map(r => r.url), ['/pair/resume']);
-  assert.equal(f.sockets.length, 0);
+  assert.equal(f.sockets.length, 1);
+  assert.equal(f.sockets[0].url, 'ws://server:8080/stream?token=resumed-token');
   assert.equal(f.element('code-entry').hidden, true);
   assert.equal(f.element('qr-pairing').hidden, true);
-  assert.equal(f.element('connect').disabled, false);
   assert.equal(f.requests[0].options.headers['X-Device-Secret'], savedDevice.secret);
-  f.submit(); await flush(); assert.equal(f.sockets.length, 1);
 });
 
 test('removed device clears saved credentials and offers QR or code pairing', async () => {
@@ -114,7 +113,7 @@ test('removed device clears saved credentials and offers QR or code pairing', as
   f.submit(); await flush(); assert.equal(f.sockets[0].url, 'ws://server:8080/stream?token=code-token');
 });
 
-test('temporary service failure preserves remembered credentials and launch retries', async () => {
+test('temporary service failure preserves remembered credentials and automatically retries resume', async () => {
   let available = false;
   const f = fixture({ stored: savedDevice, resume: () => {
     if (!available) throw new Error('offline');
@@ -124,7 +123,12 @@ test('temporary service failure preserves remembered credentials and launch retr
   assert.equal(f.preferences.has('wheelplay.browserDevice'), true);
   assert.equal(f.element('connect').disabled, false);
   assert.equal(f.requests.some(r => r.url.endsWith('/request')), false);
-  available = true; f.submit(); await flush();
+  assert.equal(f.sockets.length, 0);
+  const retryTimer = [...f.timers.values()].find(t => t.delay === 2000);
+  assert.ok(retryTimer);
+  available = true;
+  await retryTimer.fn(); await flush();
+  assert.equal(f.sockets.length, 1);
   assert.equal(f.sockets[0].url, 'ws://server:8080/stream?token=recovered-token');
 });
 
@@ -135,14 +139,15 @@ test('quick browser link pairs but keeps launch options available until a click'
   f.submit(); await flush(); assert.equal(f.sockets.length, 1);
 });
 
-test('pagehide and back navigation retain device memory and never automatically launch', async () => {
+test('pagehide and back navigation retain device memory and automatically resume stream', async () => {
   const f = fixture({ stored: savedDevice }); await flush();
+  assert.equal(f.sockets.length, 1);
   f.windowEvents.pagehide();
   assert.equal(f.preferences.has('wheelplay.browserDevice'), true);
   assert.equal(f.requests.some(r => r.url.endsWith('/revoke')), false);
   f.windowEvents.pageshow({ persisted: true }); await flush();
-  assert.equal(f.sockets.length, 0);
-  assert.equal(f.element('connect-label').textContent, '启动显示');
+  assert.equal(f.sockets.length, 2);
+  assert.equal(f.sockets[1].url, 'ws://server:8080/stream?token=resumed-token');
 });
 
 test('storage-disabled browsers can still pair and launch without being enrolled', async () => {
@@ -153,13 +158,17 @@ test('storage-disabled browsers can still pair and launch without being enrolled
   f.submit(); assert.equal(f.sockets.length, 1);
 });
 
-test('revocation between restore and launch forces fresh pairing instead of using stale token', async () => {
+test('manual disconnect stays on setup page and revocation before launch forces fresh pairing', async () => {
   let revoked = false;
   const f = fixture({ stored: savedDevice, resume: () => revoked ? { ok: false, status: 401 } : ok({ token: 'old-token', name: savedDevice.name }) });
-  await flush(); revoked = true; f.submit(); await flush();
-  assert.equal(f.sockets.length, 0);
+  await flush();
+  assert.equal(f.sockets.length, 1);
+  f.element('disconnect').handlers.click(); await flush();
+  assert.equal(f.sockets.length, 1, 'Explicit disconnect must stay on setup page without auto-launching');
+  revoked = true; f.submit(); await flush();
+  assert.equal(f.sockets.length, 1);
   f.submit(); await flush();
-  assert.equal(f.sockets[0].url, 'ws://server:8080/stream?token=code-token');
+  assert.equal(f.sockets[1].url, 'ws://server:8080/stream?token=code-token');
 });
 
 test('HTTPS setup uses the configured port and strips pairing data, including IPv6 hosts', async () => {

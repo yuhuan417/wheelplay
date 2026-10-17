@@ -119,13 +119,21 @@ test('the overlay forwards a complete drag independently of the native video ele
   assert.deepEqual(ws.sent.filter(m => m.type === 'touch').map(m => m.contacts[0].down), [true, true, false]);
 });
 
-test('the optional top bar is hidden only after connecting and restored on disconnect', async () => {
+test('the optional top bar persists in storage, stays visible while waiting for iPhone, hides when live, and returns to setup on host-ui', async () => {
   const f = fixture();
   f.element('hide-toolbar').checked = true;
+  f.element('hide-toolbar').handlers.change();
+  assert.equal(f.preferences.get('wheelplay.hideToolbar'), 'true');
   const ws = await f.connect();
   assert.equal(f.element('topbar').hidden, true);
-  f.element('disconnect').handlers.click();
+  ws.onmessage({ data: JSON.stringify({ type: 'status', width: 1280, height: 720, streaming: false }) });
+  assert.equal(f.element('topbar').hidden, false, 'Top bar must remain visible while waiting for iPhone');
+  f.frame(ws);
+  assert.equal(f.element('topbar').hidden, true, 'Top bar hides once CarPlay frame is live');
+  ws.onmessage({ data: JSON.stringify({ type: 'host-ui' }) });
   assert.equal(f.element('topbar').hidden, false);
+  assert.equal(f.element('pairing').hidden, false);
+  assert.equal(f.element('display').hidden, true);
 });
 
 test('normal launch leaves fullscreen and the top bar unchanged', async () => {

@@ -441,6 +441,8 @@ class LanWebServerTest {
                 assertTrue(readHeaders(client).startsWith("HTTP/1.1 101"))
                 client.soTimeout = 3000
                 assertEquals("audio-route", org.json.JSONObject(frame(client).toString(Charsets.UTF_8)).getString("type"))
+                assertTrue(WebSession.requestHostUi())
+                assertEquals("host-ui", org.json.JSONObject(frame(client).toString(Charsets.UTF_8)).getString("type"))
                 WebSession.forgetBrowser(context, id)
                 try { assertEquals(-1, client.getInputStream().read()) }
                 catch (_: java.net.SocketException) { /* Revocation can force-close with a TCP reset. */ }

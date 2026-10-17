@@ -342,8 +342,14 @@ if (typeof document !== 'undefined') {
   let authGeneration = 0, deviceCredential = null, storageAvailable = false;
   let launchPresentation = null;
   const devicePreference = 'wheelplay.browserDevice';
-  let pairingToken = null, qrGeneration = 0, qrTimer = null, qrRequest = null;
+  let pairingToken = null, qrGeneration = 0, qrTimer = null, qrRequest = null, resumeTimer = null;
   let viewportReportTimer = null, lastViewportSignature = '';
+  const hideToolbarOption = $('hide-toolbar');
+  const hideToolbarPreference = 'wheelplay.hideToolbar';
+  try { hideToolbarOption.checked = window.localStorage.getItem(hideToolbarPreference) === 'true'; } catch (_) {}
+  hideToolbarOption.addEventListener('change', () => {
+    try { window.localStorage.setItem(hideToolbarPreference, String(hideToolbarOption.checked)); } catch (_) {}
+  });
   const canvasOption = $('canvas-video');
   const canvasPreference = 'wheelplay.canvasVideo';
   try { canvasOption.checked = window.localStorage.getItem(canvasPreference) === 'true'; } catch (_) {}
@@ -415,8 +421,9 @@ if (typeof document !== 'undefined') {
     if (generation !== authGeneration) return;
     showPairingReady(name); $('device-status').textContent = message;
   }
-  async function initializePairing(linkedCode = null) {
+  async function initializePairing(linkedCode = null, autoConnect = true) {
     const generation = ++authGeneration;
+    clearTimeout(resumeTimer); resumeTimer = null;
     stopQr(); pairingToken = null;
     showPairingEntry(); $('connect').disabled = true;
     if (deviceCredential) {
@@ -426,7 +433,12 @@ if (typeof document !== 'undefined') {
         if (generation !== authGeneration) return;
         pairingToken = result.token;
         showPairingReady(result.name);
-        $('device-status').textContent = '已自动恢复配对。选择上方选项后，点击「启动显示」。';
+        if (autoConnect) {
+          $('device-status').textContent = '已自动恢复配对，正在启动显示…';
+          stopped = false; attempts = 0; connect();
+        } else {
+          $('device-status').textContent = '已自动恢复配对。选择上方选项后，点击「启动显示」。';
+        }
         return;
       } catch (error) {
         if (generation !== authGeneration) return;
@@ -436,8 +448,11 @@ if (typeof document !== 'undefined') {
           $('message').textContent = '设备记忆已失效或已被移除，请重新配对。';
         } else {
           showPairingReady(deviceCredential.name || '已记住的浏览器');
-          $('status').textContent = '等待恢复配对';
-          $('device-status').textContent = '暂时无法恢复配对，请检查服务和网络后点击「启动显示」重试。';
+          $('status').textContent = '等待恢复配对 · 正在自动重试';
+          $('device-status').textContent = '暂时无法恢复配对，正在自动重试；也可点击「启动显示」立即重试。';
+          resumeTimer = setTimeout(() => {
+            if (generation === authGeneration) initializePairing(linkedCode, autoConnect);
+          }, 2000);
           return;
         }
       }
@@ -582,6 +597,9 @@ if (typeof document !== 'undefined') {
     canvas.classList.toggle('stale', !value);
     touchSurface.classList.toggle('stale', !value);
     waitingElement.hidden = value;
+    if (!display.hidden) {
+      $('topbar').hidden = Boolean(launchPresentation?.immersive) || (value && hideToolbarOption.checked);
+    }
     if (!value && pointers.size) release();
   }
   // Routine callers repeat the same text every frame or every status message; a held message
@@ -747,7 +765,8 @@ if (typeof document !== 'undefined') {
     launchPresentation.immersive = false;
     if (launchPresentation.ownsFullscreen && document.fullscreenElement) exitLaunchFullscreen();
   }
-  function disconnect(refreshQr = true) {
+  function disconnect(refreshQr = true, autoConnect = false) {
+    clearTimeout(resumeTimer); resumeTimer = null;
     stopQr();
     authGeneration++;
     restoreLaunchPresentation();
@@ -761,9 +780,10 @@ if (typeof document !== 'undefined') {
     invalidateDisplayRect();
     $('disconnect').hidden = true; $('connect').disabled = false;
     $('status').textContent = '已断开';
-    if (refreshQr) initializePairing();
+    if (refreshQr) initializePairing(null, autoConnect);
   }
   function connect() {
+    clearTimeout(resumeTimer); resumeTimer = null;
     clearTimeout(retry);
     $('connect').disabled = true;
     $('status').textContent = paired ? '正在重新连接…' : '正在连接…';
@@ -812,7 +832,7 @@ if (typeof document !== 'undefined') {
       $('phone-connect').disabled = false;
       $('phone-connect-message').textContent = '请保持 Android 上的 WheelPlay 在前台；点击连接 iPhone，按提示完成授权。';
       $('pairing').hidden = true; $('display').hidden = false; $('disconnect').hidden = false;
-      $('topbar').hidden = $('hide-toolbar').checked || Boolean(launchPresentation?.immersive);
+      $('topbar').hidden = hideToolbarOption.checked || Boolean(launchPresentation?.immersive);
       lastViewportSignature = '';
       scheduleViewportReport();
       $('status').textContent = '已连接 · 等待画面';
@@ -838,6 +858,9 @@ if (typeof document !== 'undefined') {
           $('phone-connect-message').textContent = data.message;
           return;
         }
+        if (data.type === 'host-ui') {
+          disconnect(); return;
+        }
         if (data.type === 'busy') {
           const message = data.message; disconnect(); $('message').textContent = message; return;
         }
@@ -853,6 +876,9 @@ if (typeof document !== 'undefined') {
           // The server resets availability when the iPhone starts a new video configuration.
           if (!data.rtcAvailable) rtcRequested = false;
           setLive(Boolean(data.streaming && (rtc.active || lastFrame && (jpegRendered || screen.naturalWidth))));
+          if (!live && !data.streaming) {
+            $('topbar').hidden = Boolean(launchPresentation?.immersive);
+          }
           const transport = rtc.active ? `${rtc.codec === 'H265' ? 'HEVC' : 'H.264'} / WebRTC${useCanvas ? ' / Canvas' : ''}${rtcFps === null ? '' : ` · ${rtcFps} fps`}` : `JPEG${data.fallback ? ' · 已回退' : ''}`;
           // A fallback is a one-shot event that the next JPEG frame would otherwise overwrite
           // within one frame interval, so hold it long enough to be read.
@@ -917,11 +943,12 @@ if (typeof document !== 'undefined') {
       socket = null; pointers.clear(); clearInterval(heartbeat); cleanupRtc(); cleanupImage(); setLive(false);
       browserAudio.close(); $('audio-message').hidden = true;
       if (stopped) return;
-      if (!paired || ++attempts > 8) {
+      if (!deviceCredential && (!paired || ++attempts > 8)) {
         disconnect(); $('status').textContent = '连接未成功';
         $('message').textContent = '请检查服务端是否运行、配对码是否正确。连续输错后请等待 30 秒再试。';
         return;
       }
+      if (deviceCredential) attempts++;
       $('status').textContent = '连接中断 · 正在重试';
       $('stage').textContent = '检查服务端与车机是否仍在同一局域网。';
       const generation = authGeneration;
@@ -937,13 +964,14 @@ if (typeof document !== 'undefined') {
           }
         }
         if (!stopped && generation === authGeneration) connect();
-      }, Math.min(8000, 500 * 2 ** attempts));
+      }, Math.min(8000, 500 * 2 ** Math.min(attempts, 5)));
     };
     ws.onerror = () => {}; // onclose owns retry and visible error state.
   }
   $('connect-form').addEventListener('submit', event => {
     event.preventDefault();
     const generation = ++authGeneration;
+    clearTimeout(resumeTimer); resumeTimer = null;
     prepareLaunchPresentation();
     stopQr(); $('connect').disabled = true; $('message').textContent = '';
     const start = () => { if (generation === authGeneration) { stopped = false; attempts = 0; connect(); } };

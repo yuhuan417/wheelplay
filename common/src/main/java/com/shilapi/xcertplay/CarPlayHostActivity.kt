@@ -2876,6 +2876,11 @@ class CarPlayHostActivity : ComponentActivity() {
                     }
                 }
             }
+
+            override fun onHostUiRequested(session: AirPlaySession) {
+                if (controllerGeneration != restartGeneration) return
+                WebSession.requestHostUi()
+            }
         }
 
     private fun createStatusReporter(

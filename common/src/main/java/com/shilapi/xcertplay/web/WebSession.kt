@@ -76,6 +76,12 @@ internal object WebSession {
         jpegDemandListener?.invoke()
     }
 
+    fun requestHostUi(): Boolean {
+        val http = server?.requestHostUi() == true
+        val https = secureServer?.requestHostUi() == true
+        return http || https
+    }
+
     fun viewerStateChanged() {
         notifyJpegDemand()
         val refresh = {

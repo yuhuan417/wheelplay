@@ -26,6 +26,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
     val hasViewer get() = viewer != null
     val jpegReady get() = viewer?.jpegReady == true
     fun frameAvailable() { viewer?.frameAvailable() }
+    fun requestHostUi(): Boolean = viewer?.requestHostUi() == true
     fun disconnectViewer() { viewer?.disconnect("设备已移除") }
 
     override fun createClientHandler(finalAccept: java.net.Socket, inputStream: java.io.InputStream): ClientHandler {
@@ -225,6 +226,11 @@ internal class LanWebServer(private val context: Context, private val code: Stri
         @Volatile var lastSeen = SystemClock.elapsedRealtime()
         fun frameStalled(now: Long) = sender.frameStalled(now)
         fun frameAvailable() = sender.frameAvailable()
+        fun requestHostUi(): Boolean {
+            if (ended.get() || closing.get() || viewer !== this) return false
+            reply(WebStreamSender.Control.HOST_UI, """{"type":"host-ui"}""")
+            return true
+        }
         private val ended = AtomicBoolean(false)
         private val closing = AtomicBoolean(false)
         val jpegReady: Boolean
