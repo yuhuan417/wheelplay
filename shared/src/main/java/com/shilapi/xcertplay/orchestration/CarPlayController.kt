@@ -352,23 +352,31 @@ class CarPlayController(
         if (config.transport == CarPlayTransport.WIRED) {
             permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
             attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
-        } else if (wifiLock == null) {
-            @Suppress("DEPRECATION")
-            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-            } else {
-                WifiManager.WIFI_MODE_FULL_HIGH_PERF
-            }
-            wifiLock = runCatching {
-                appContext.getSystemService(WifiManager::class.java)
-                    ?.createWifiLock(mode, "WheelPlay:carplayLowLatency")
-                    ?.apply {
-                        setReferenceCounted(false)
-                        acquire()
-                    }
-            }.getOrNull()
         }
         startMfi()
+    }
+
+    private fun acquireWifiLock() {
+        if (closed || wifiLock?.isHeld == true) return
+        @Suppress("DEPRECATION")
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        wifiLock = runCatching {
+            appContext.getSystemService(WifiManager::class.java)
+                ?.createWifiLock(mode, "WheelPlay:carplayLowLatency")
+                ?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+        }.getOrNull()
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        wifiLock = null
     }
 
     /** Reopens the CH341/MFi path without restarting the app. */
@@ -401,8 +409,7 @@ class CarPlayController(
             closed = true
         }
         touchQueue.close()
-        wifiLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
-        wifiLock = null
+        releaseWifiLock()
         mediaState.close()
         BydNavigationOutputs.endNow()
         closeReceivers()
@@ -839,6 +846,47 @@ class CarPlayController(
 
             val mfi = mfiSession?.client
                 ?: throw IOException("MFi coprocessor client is unavailable")
+            onStatus(CarPlayStatus.WaitingForPairedIphone)
+
+            val adapter = bluetoothAdapter
+                ?: throw IOException("Bluetooth adapter is unavailable")
+            if (!adapter.isEnabled) throw IOException("Bluetooth is not enabled")
+            val device = selectWirelessBluetoothDevice(adapter)
+            val hostBluetoothMac = accessoryBluetoothMac(adapter)
+            debugLog(
+                "wireless selected Bluetooth target name=${device.name ?: "unknown"} " +
+                    "address=${device.address} localBt=$hostBluetoothMac",
+            )
+
+            // Probe and connect Bluetooth RFCOMM first so that when the iPhone is absent,
+            // we never power up the Wi-Fi Direct / hotspot radio, mDNS, AirPlay listener, or WifiLock.
+            onStatus(CarPlayStatus.ConnectingBluetooth)
+            debugLog(
+                "wireless RFCOMM connecting address=${device.address} " +
+                    "uuid=$IAP2_IPHONE_UUID",
+            )
+            var socket = device
+                .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
+                .also { bluetoothSocket = it }
+            connectBluetoothSocket(socket, device.address)
+            debugLog("wireless RFCOMM connected address=${device.address}")
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+            var stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
+            var channel = Iap2Session.openWireless(
+                stream,
+                traceContext = "wireless-rfcomm",
+                onTrace = ::debugLog,
+            ).also { csm = it }
+            debugLog("wireless iAP2 CSM channel opened over RFCOMM")
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+
+            acquireWifiLock()
             val hotspotInfo = startWirelessHotspot(generation)
             if (isStaleWirelessRun(generation)) {
                 closeWirelessStack()
@@ -882,17 +930,6 @@ class CarPlayController(
                     address = hostAddressText,
                     backend = hotspotInfo.backend.label,
                 ),
-            )
-            onStatus(CarPlayStatus.WaitingForPairedIphone)
-
-            val adapter = bluetoothAdapter
-                ?: throw IOException("Bluetooth adapter is unavailable")
-            if (!adapter.isEnabled) throw IOException("Bluetooth is not enabled")
-            val device = selectWirelessBluetoothDevice(adapter)
-            val hostBluetoothMac = accessoryBluetoothMac(adapter)
-            debugLog(
-                "wireless selected Bluetooth target name=${device.name ?: "unknown"} " +
-                    "address=${device.address} localBt=$hostBluetoothMac",
             )
             val wirelessAirPlayConfig = airPlayConfig.copy(
                 deviceId = deviceIdentifier,
@@ -947,30 +984,23 @@ class CarPlayController(
                 return
             }
 
-            onStatus(CarPlayStatus.ConnectingBluetooth)
-            debugLog(
-                "wireless RFCOMM connecting address=${device.address} " +
-                    "uuid=$IAP2_IPHONE_UUID",
-            )
-            val socket = device
+            if (channel.isClosed) {
+                debugLog("wireless RFCOMM closed while hotspot was starting; reconnecting RFCOMM")
+                closeBluetoothBootstrapTransport()
+                socket = device
                     .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
                     .also { bluetoothSocket = it }
-            connectBluetoothSocket(socket, device.address)
-            debugLog("wireless RFCOMM connected address=${device.address}")
-            if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
-                return
-            }
-            val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
-            val channel = Iap2Session.openWireless(
-                stream,
-                traceContext = "wireless-rfcomm",
-                onTrace = ::debugLog,
-            ).also { csm = it }
-            debugLog("wireless iAP2 CSM channel opened over RFCOMM")
-            if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
-                return
+                connectBluetoothSocket(socket, device.address)
+                if (isStaleWirelessRun(generation)) {
+                    closeWirelessStack()
+                    return
+                }
+                stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
+                channel = Iap2Session.openWireless(
+                    stream,
+                    traceContext = "wireless-rfcomm",
+                    onTrace = ::debugLog,
+                ).also { csm = it }
             }
             val identification = config.identification.copy(
                 wireless = Iap2WirelessIdentification(hostBluetoothMac, hotspotInfo.ssid),
@@ -992,16 +1022,17 @@ class CarPlayController(
 
             onStatus(CarPlayStatus.RunningWireless)
             debugLog("wireless Bluetooth iAP2 control starting")
+            val activeChannel = channel
             val result = Iap2WirelessControlClient(
-                session = channel,
+                session = activeChannel,
                 mfi = Iap2MfiAuthenticationClient(mfi),
             ).run(
                 identification = identification,
                 endpoint = endpoint,
                 timeoutMillis = controlLoopTimeoutMillis(),
                 locationProvider = locationProvider,
-                onReady = { if (!isStaleWirelessRun(generation) && !wirelessTunnelReady.get()) mediaState.bind(channel) },
-                onIncoming = { frame -> onControlFrame(channel, frame) },
+                onReady = { if (!isStaleWirelessRun(generation) && !wirelessTunnelReady.get()) mediaState.bind(activeChannel) },
+                onIncoming = { frame -> onControlFrame(activeChannel, frame) },
                 onProgress = ::debugLog,
             )
             if (isStaleWirelessRun(generation)) {
@@ -1724,6 +1755,7 @@ class CarPlayController(
     }
 
     private fun closeWirelessStack(service: CarPlayVpnService? = vpnService) {
+        releaseWifiLock()
         mediaState.disconnected()
         wirelessConnectionProof.clear()
         media.setIapTunnelHandler(null)

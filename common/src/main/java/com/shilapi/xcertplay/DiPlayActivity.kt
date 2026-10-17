@@ -362,7 +362,7 @@ class DiPlayActivity : AppCompatActivity() {
             webStage = label("等待连接 iPhone", 16, TEXT)
             body.addView(webStage)
             sessionConnectButton = button("连接", false, R.drawable.ic_server_phone) {
-                if (!CarPlayBackgroundSession.hasSession()) connect(true)
+                if (!CarPlayBackgroundSession.hasSession() || CarPlayBackgroundSession.standby) connect(true)
             }.apply { visibility = View.GONE }
             body.addView(sessionConnectButton, ui.secondaryButtonLayout(12))
             body.addView(button("管理 iPhone 连接", false) { navigate("phone") }, ui.secondaryButtonLayout(16))
@@ -378,6 +378,7 @@ class DiPlayActivity : AppCompatActivity() {
         val addresses = if (WebSession.running && WebSession.error == null) WebSession.addresses(this) else emptyList()
         val primary = addresses.firstOrNull()
         val addressText = if (!WebSession.running && setupError != null) "请先导入认证资源以激活 Web 服务"
+            else if (!WebSession.running && CarPlayBackgroundSession.standby) "待机省电中（等待 iPhone 蓝牙或随车通电唤醒）"
             else WebSession.error ?: if (WebSession.running) primary?.url
                 ?: "未找到局域网地址，请连接 Wi-Fi" else "正在启动服务…"
         if (webAddress?.text?.toString() != addressText) webAddress?.text = addressText
@@ -1242,7 +1243,16 @@ class DiPlayActivity : AppCompatActivity() {
         }
         val open = {
             AirPlayPersistence.saveWirelessEnabled(this, wireless)
+            startWebServiceIfReady()
             openProjection()
+        }
+        if (CarPlayBackgroundSession.standby && wireless == AirPlayPersistence.loadWirelessEnabled(this)) {
+            startWebServiceIfReady()
+            if (CarPlayBackgroundSession.wake("手动连接")) {
+                navigate("service")
+                refreshStatus(); refreshService()
+                return
+            }
         }
         if (CarPlayBackgroundSession.hasSession()) CarPlayBackgroundSession.stop { runOnUiThread { open() } }
         else open()
@@ -1341,10 +1351,11 @@ class DiPlayActivity : AppCompatActivity() {
     }
 
     private fun refreshStatus() {
-        val running = CarPlayBackgroundSession.hasSession()
+        val running = CarPlayBackgroundSession.hasSession() && !CarPlayBackgroundSession.standby
         status?.text = when {
             setupError != null -> "认证配置需要处理"
             CarPlayBackgroundSession.active -> "CarPlay 已连接"
+            CarPlayBackgroundSession.standby -> "蓝牙待机省电中（等待 iPhone 靠近或随车通电）"
             running -> "正在连接 iPhone…"
             DiPlayPreferences.phoneAddress(this) != null -> "已选择 ${DiPlayPreferences.phoneName(this)}"
             else -> "尚未选择 iPhone"

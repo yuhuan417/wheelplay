@@ -14,7 +14,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -37,9 +42,55 @@ class DiPlaySessionService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private var destroyed = false
     private var activationBlocked = false
+    private var standby = false
+    private var receiverRegistered = false
     private var currentState = NowPlayingState()
     private var currentSession: MediaSession? = null
     private var currentArtwork: Bitmap? = null
+
+    private val wakeAndPowerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (destroyed || activationBlocked) return
+            when (intent.action) {
+                Intent.ACTION_POWER_CONNECTED -> {
+                    if (standby || !WebSession.running || !CarPlayBackgroundSession.active) {
+                        wakeFromStandby("随车通电")
+                    }
+                }
+                Intent.ACTION_POWER_DISCONNECTED -> {
+                    if (!CarPlayBackgroundSession.active) {
+                        if (!CarPlayBackgroundSession.requestStandby("随车断电，已进入省电待机")) {
+                            enterStandby()
+                        }
+                    }
+                }
+                BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                    val device = extractBluetoothDevice(intent)
+                    if (matchesTargetIphone(device) && !CarPlayBackgroundSession.active) {
+                        wakeFromStandby("iPhone 蓝牙已连接")
+                    }
+                }
+                BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED -> {
+                    val state = intent.getIntExtra(BluetoothAdapter.EXTRA_CONNECTION_STATE, -1)
+                    if (state == BluetoothAdapter.STATE_CONNECTED) {
+                        val device = extractBluetoothDevice(intent)
+                        if (matchesTargetIphone(device) && !CarPlayBackgroundSession.active) {
+                            wakeFromStandby("iPhone 蓝牙已连接")
+                        }
+                    }
+                }
+                BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                    val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)
+                    if (state == BluetoothAdapter.STATE_ON &&
+                        (standby || CarPlayBackgroundSession.standby) &&
+                        !CarPlayBackgroundSession.active
+                    ) {
+                        wakeFromStandby("蓝牙已开启")
+                    }
+                }
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -58,12 +109,14 @@ class DiPlaySessionService : Service() {
                 media.bind(current?.controller, current?.sink)
             }
         } }
+        registerWakeAndPowerReceiver()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
     @SuppressLint("WakelockTimeout") // Owned by this foreground service, released in onDestroy.
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            standby = false
             media.close()
             runWebAction { WebSession.stop() }
             CarPlayBackgroundSession.stop()
@@ -75,12 +128,18 @@ class DiPlaySessionService : Service() {
             return START_NOT_STICKY
         }
         activationBlocked = false
+        if (intent?.action == ACTION_STANDBY) {
+            standby = true
+        } else if (intent?.action != ACTION_MEDIA) {
+            standby = false
+        }
         updateNotification()
         // Foreground startup must be acknowledged even when an external start is rejected.
         // Never open listeners or acquire a wake lock without a validated identity.
         if (!(DiPlayBootstrap.importing && WebSession.running) &&
             runCatching { DiPlayBootstrap.ensure(this) }.isFailure) {
             activationBlocked = true
+            standby = false
             WebSession.stop()
             CarPlayBackgroundSession.stop()
             releaseLocks()
@@ -96,11 +155,26 @@ class DiPlaySessionService : Service() {
             }
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_STANDBY) {
+            enterStandby()
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_WAKE) {
+            wakeFromStandby("手动唤醒")
+            return START_NOT_STICKY
+        }
+        activateWebAndLocks()
+        return START_NOT_STICKY
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private fun activateWebAndLocks() {
+        standby = false
         runWebAction {
             if (!destroyed) WebSession.start(this)
             updateNotification()
             val acquireWakeLock = {
-                if (!destroyed && WebSession.running) {
+                if (!destroyed && !standby && WebSession.running) {
                     if (wakeLock == null) {
                         wakeLock = getSystemService(PowerManager::class.java)
                             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WheelPlay:server").apply { acquire() }
@@ -123,7 +197,75 @@ class DiPlaySessionService : Service() {
             }
             if (Looper.myLooper() == Looper.getMainLooper()) acquireWakeLock() else main.post { acquireWakeLock() }
         }
-        return START_NOT_STICKY
+    }
+
+    private fun enterStandby() {
+        if (destroyed || activationBlocked) return
+        standby = true
+        runWebAction { WebSession.stop() }
+        releaseLocks()
+        updateNotification()
+    }
+
+    internal fun wakeFromStandby(trigger: String) {
+        if (destroyed || activationBlocked) return
+        if (runCatching { DiPlayBootstrap.ensure(this) }.isFailure) return
+        activateWebAndLocks()
+        if (!CarPlayBackgroundSession.wake(trigger) &&
+            !CarPlayBackgroundSession.hasSession() &&
+            DiPlayPreferences.autoConnect(this) &&
+            DiPlayPreferences.phoneAddress(this) != null
+        ) {
+            runCatching {
+                startActivity(
+                    Intent(this, CarPlayHostActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
+                )
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun extractBluetoothDevice(intent: Intent): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        }
+
+    private fun matchesTargetIphone(device: BluetoothDevice?): Boolean {
+        if (device == null) return false
+        val targetAddress = DiPlayPreferences.phoneAddress(this)
+        if (!targetAddress.isNullOrBlank()) {
+            return device.address.equals(targetAddress, ignoreCase = true)
+        }
+        val name = runCatching { device.name }.getOrNull()
+        return name == null || name.contains("iPhone", ignoreCase = true)
+    }
+
+    private fun registerWakeAndPowerReceiver() {
+        if (receiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(wakeAndPowerReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(wakeAndPowerReceiver, filter)
+            }
+            receiverRegistered = true
+        }
+    }
+
+    private fun unregisterWakeAndPowerReceiver() {
+        if (!receiverRegistered) return
+        receiverRegistered = false
+        runCatching { unregisterReceiver(wakeAndPowerReceiver) }
     }
 
     private fun runWebAction(action: () -> Unit) {
@@ -162,10 +304,20 @@ class DiPlaySessionService : Service() {
             val stop = PendingIntent.getService(this, 1, Intent(this, DiPlaySessionService::class.java)
                 .setAction(ACTION_STOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             val port = if (WebSession.running) WebSession.httpPort else WebListenSettings.httpPort(this)
-            builder.setContentTitle(getString(R.string.app_name)).setContentText(
-                if (WebSession.running) "局域网串流服务运行中 · $port" else "正在准备串流服务…")
-                .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_media_stop),
-                    "停止服务", stop).build())
+            val statusText = when {
+                WebSession.running -> "局域网串流服务运行中 · $port"
+                standby -> "待机省电中 · 等待 iPhone 蓝牙或随车通电"
+                else -> "正在准备串流服务…"
+            }
+            builder.setContentTitle(getString(R.string.app_name)).setContentText(statusText)
+            if (standby) {
+                val wake = PendingIntent.getService(this, 2, Intent(this, DiPlaySessionService::class.java)
+                    .setAction(ACTION_WAKE), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                builder.addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_media_play),
+                    "立即唤醒", wake).build())
+            }
+            builder.addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_media_stop),
+                "停止服务", stop).build())
         }
         val notification = builder.build()
         if (Build.VERSION.SDK_INT >= 29) {
@@ -187,6 +339,7 @@ class DiPlaySessionService : Service() {
 
     override fun onDestroy() {
         destroyed = true
+        unregisterWakeAndPowerReceiver()
         sessionSubscription?.close()
         media.close()
         runWebAction { WebSession.stop() }
@@ -196,6 +349,8 @@ class DiPlaySessionService : Service() {
     }
     companion object {
         const val ACTION_STOP = "com.shihab.diplay.DISCONNECT"
+        const val ACTION_STANDBY = "com.shilapi.xcertplay.STANDBY"
+        const val ACTION_WAKE = "com.shilapi.xcertplay.WAKE"
         private const val ACTION_MEDIA = "com.shilapi.xcertplay.MEDIA_COMMAND"
         private const val EXTRA_COMMAND = "command"
         private const val EXTRA_GENERATION = "generation"

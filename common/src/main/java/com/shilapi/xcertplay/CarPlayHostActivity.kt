@@ -2911,7 +2911,15 @@ class CarPlayHostActivity : ComponentActivity() {
         displayDiagnosticAttempt = DisplayDiagnosticSnapshot.currentAttempt(this)
         controller = snapshot.controller
         sink = snapshot.sink
-        CarPlayBackgroundSession.store(snapshot.controller, snapshot.sink, snapshot.width, snapshot.height, this) { completion ->
+        CarPlayBackgroundSession.store(
+            snapshot.controller,
+            snapshot.sink,
+            snapshot.width,
+            snapshot.height,
+            this,
+            wake = { trigger -> runOnUiThread { wakeFromPowerSaveStandby(trigger) } },
+            standby = { trigger -> runOnUiThread { enterPowerSaveStandby(trigger) } },
+        ) { completion ->
             runOnUiThread {
                 shutdown(false, "WheelPlay disconnect", completion)
                 finish()
@@ -3026,7 +3034,15 @@ class CarPlayHostActivity : ComponentActivity() {
             locationProvider = locationProvider,
         )
         controller = next
-        CarPlayBackgroundSession.store(next, renderer, size.width, size.height, this) { completion ->
+        CarPlayBackgroundSession.store(
+            next,
+            renderer,
+            size.width,
+            size.height,
+            this,
+            wake = { trigger -> runOnUiThread { wakeFromPowerSaveStandby(trigger) } },
+            standby = { trigger -> runOnUiThread { enterPowerSaveStandby(trigger) } },
+        ) { completion ->
             runOnUiThread {
                 shutdown(terminateProcess = false, reason = "WheelPlay disconnect", completion = completion)
                 finish()
@@ -3141,10 +3157,25 @@ class CarPlayHostActivity : ComponentActivity() {
         startCarPlay(size)
     }
 
+    private fun isExternalPowerConnected(): Boolean {
+        val status = runCatching {
+            registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }.getOrNull()
+        val plugged = status?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        return plugged != 0
+    }
+
+    private fun maxWirelessReconnectAttempts(): Int =
+        if (isExternalPowerConnected()) MAX_CHARGING_RECONNECT_ATTEMPTS else MAX_BATTERY_RECONNECT_ATTEMPTS
+
     private fun reconnectAfterLoss(reason: String) {
         if (!CarPlayBackgroundSession.isOwner(this)) return
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress) return
         if (reconnectScheduled) return
+        if (wirelessEnabled && reconnectAttempts >= maxWirelessReconnectAttempts()) {
+            enterPowerSaveStandby("iPhone 不在附近，已进入蓝牙待机省电模式")
+            return
+        }
         reconnectScheduled = true
         val generation = restartGeneration
         val delayMillis = if (reason.contains("AirPlay iAP tunnel", ignoreCase = true)) {
@@ -3169,6 +3200,71 @@ class CarPlayHostActivity : ComponentActivity() {
             },
             delayMillis,
         )
+    }
+
+    private fun enterPowerSaveStandby(reason: String) {
+        if (!CarPlayBackgroundSession.isOwner(this)) return
+        if (shuttingDown.get() || menuOpen) return
+        reconnectScheduled = false
+        reconnectAttempts = 0
+        activeScreenStreamTypes.clear()
+        WebSession.videoActive = false
+        appendLog(reason)
+        setConnectionStage(reason)
+        Log.i(TAG, "entering power-save standby: $reason")
+        val generation = ++restartGeneration
+        handshakeResetInProgress = true
+        val oldController = controller
+        val oldSink = sink
+        CarPlayBackgroundSession.markStandby(
+            owner = this,
+            wake = { trigger -> runOnUiThread { wakeFromPowerSaveStandby(trigger) } },
+            standby = { trigger -> runOnUiThread { enterPowerSaveStandby(trigger) } },
+        ) { completion ->
+            runOnUiThread {
+                shutdown(terminateProcess = false, reason = "WheelPlay disconnect", completion = completion)
+                finish()
+            }
+        }
+        controller = null
+        sink = null
+        teardownExecutor.execute {
+            oldController?.close()
+            oldController?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS)
+            oldSink?.close()
+            runOnUiThread {
+                if (!shuttingDown.get() && generation == restartGeneration) {
+                    handshakeResetInProgress = false
+                    if (startAfterHandshakeReset || !CarPlayBackgroundSession.standby) {
+                        startAfterHandshakeReset = false
+                        maybeStartCarPlay()
+                    } else {
+                        runCatching {
+                            startService(
+                                Intent(this, DiPlaySessionService::class.java)
+                                    .setAction(DiPlaySessionService.ACTION_STANDBY),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun wakeFromPowerSaveStandby(trigger: String) {
+        if (shuttingDown.get() || menuOpen) return
+        reconnectScheduled = false
+        reconnectAttempts = 0
+        CarPlayBackgroundSession.standby = false
+        appendLog("Waking from power-save standby ($trigger)")
+        Log.i(TAG, "waking from power-save standby: $trigger")
+        if (handshakeResetInProgress) {
+            startAfterHandshakeReset = true
+            return
+        }
+        if (controller == null) {
+            maybeStartCarPlay()
+        }
     }
 
     /** Full-stack fallback when an AirPlay-only reconnect is unavailable. */
@@ -3496,6 +3592,8 @@ class CarPlayHostActivity : ComponentActivity() {
         const val BROWSER_DISPLAY_CHANGE_DEBOUNCE_MILLIS = 900L
         const val RECONNECT_DELAY_MILLIS = 2_000L
         const val IAP_TUNNEL_RECONNECT_DELAY_MILLIS = 15_000L
+        const val MAX_BATTERY_RECONNECT_ATTEMPTS = 1
+        const val MAX_CHARGING_RECONNECT_ATTEMPTS = 2
         const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L
         const val AUDIO_CAPTURE_MARKER = "audio-capture.enabled"
         const val AUDIO_CAPTURE_DIRECTORY = "audio-captures"
@@ -3528,12 +3626,27 @@ class CarPlayHostActivity : ComponentActivity() {
 /** Process-local hand-off for keeping the CarPlay session alive while no Activity is visible. */
 internal object CarPlayBackgroundSession {
     @Volatile var active = false
+    @Volatile var standby = false
     private var stopAction: (((() -> Unit)) -> Unit)? = null
+    private var wakeAction: ((String) -> Unit)? = null
+    private var standbyAction: ((String) -> Unit)? = null
     private var stopping = false
     private var owner: Any? = null
     @Synchronized fun isOwner(candidate: Any): Boolean = owner === candidate
     @Synchronized fun hasSession(): Boolean = stopAction != null || stopping
     private val stopWaiters = mutableListOf<() -> Unit>()
+
+    fun wake(trigger: String): Boolean {
+        val action = synchronized(this) { wakeAction } ?: return false
+        action.invoke(trigger)
+        return true
+    }
+
+    fun requestStandby(reason: String): Boolean {
+        val action = synchronized(this) { standbyAction } ?: return false
+        action.invoke(reason)
+        return true
+    }
 
     fun stop(completion: () -> Unit = {}) {
         val action: (((() -> Unit)) -> Unit)?
@@ -3578,9 +3691,21 @@ internal object CarPlayBackgroundSession {
         return AutoCloseable { listeners.remove(listener) }
     }
 
-    fun store(controller: CarPlayController, sink: AndroidMediaSink, width: Int, height: Int, owner: Any, stop: (() -> Unit) -> Unit) {
+    fun store(
+        controller: CarPlayController,
+        sink: AndroidMediaSink,
+        width: Int,
+        height: Int,
+        owner: Any,
+        wake: ((String) -> Unit)? = null,
+        standby: ((String) -> Unit)? = null,
+        stop: (() -> Unit) -> Unit,
+    ) {
         synchronized(this) {
+            this.standby = false
             this.stopAction = stop
+            this.wakeAction = wake
+            this.standbyAction = standby
             this.owner = owner
             this.controller = controller
             this.sink = sink
@@ -3590,12 +3715,37 @@ internal object CarPlayBackgroundSession {
         listeners.forEach { it(snapshot()) }
     }
 
+    fun markStandby(
+        owner: Any,
+        wake: (String) -> Unit,
+        standby: (String) -> Unit,
+        stop: (() -> Unit) -> Unit,
+    ) {
+        synchronized(this) {
+            this.active = false
+            this.standby = true
+            this.stopAction = stop
+            this.wakeAction = wake
+            this.standbyAction = standby
+            this.owner = owner
+            this.controller = null
+            this.sink = null
+        }
+        listeners.forEach { it(snapshot()) }
+    }
+
     fun clear(expected: CarPlayController? = null, keepOwner: Boolean = false) {
         synchronized(this) {
             if (expected != null && controller !== expected) return
             controller = null
             sink = null
-            if (!keepOwner) { stopAction = null; owner = null }
+            if (!keepOwner) {
+                stopAction = null
+                wakeAction = null
+                standbyAction = null
+                owner = null
+                standby = false
+            }
             active = false
             width = 0
             height = 0
