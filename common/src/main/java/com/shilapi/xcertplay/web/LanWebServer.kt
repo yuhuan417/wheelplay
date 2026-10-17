@@ -30,7 +30,10 @@ internal class LanWebServer(private val context: Context, private val code: Stri
     fun disconnectViewer() { viewer?.disconnect("设备已移除") }
 
     override fun createClientHandler(finalAccept: java.net.Socket, inputStream: java.io.InputStream): ClientHandler {
-        runCatching { finalAccept.tcpNoDelay = true }
+        runCatching {
+            finalAccept.tcpNoDelay = true
+            finalAccept.trafficClass = 0xB8
+        }
         return super.createClientHandler(finalAccept, inputStream)
     }
 

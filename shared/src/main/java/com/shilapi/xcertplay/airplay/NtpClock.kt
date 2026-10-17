@@ -39,6 +39,7 @@ class NtpClock : Closeable {
         check(!running.getAndSet(true)) { "NtpClock is already running" }
         val bound = DatagramSocket(null)
         bound.reuseAddress = true
+        runCatching { bound.trafficClass = 0xB8 }
         bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
         synchronized(socketLock) { socket = bound }
         receiver = Thread(::runReceiver, "airplay-ntp-rx").apply { isDaemon = true; start() }

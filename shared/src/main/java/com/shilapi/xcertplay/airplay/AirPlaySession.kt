@@ -102,6 +102,13 @@ class AirPlaySession(
 
     internal fun logTrace(message: String) = trace(message)
 
+    init {
+        runCatching {
+            socket.tcpNoDelay = true
+            socket.trafficClass = TRAFFIC_CLASS_EXPEDITED
+        }
+    }
+
     fun start() {
         Thread(::runControl, "airplay-control").apply {
             isDaemon = true
@@ -607,6 +614,10 @@ class AirPlaySession(
         try {
             val socket = server.accept()
             socket.setSoLinger(true, 0)
+            runCatching {
+                socket.tcpNoDelay = true
+                socket.trafficClass = TRAFFIC_CLASS_EXPEDITED
+            }
             debugLog("airplay event connection accepted from ${socket.remoteSocketAddress}")
             eventSocket = socket
             val shared = pairVerify.shared
@@ -713,6 +724,8 @@ class AirPlaySession(
         const val READ_CHUNK_BYTES = 16 * 1024
         const val EVENT_READY_POLL_MILLIS = 25L
         const val NANOS_PER_MILLISECOND = 1_000_000L
+        /** DSCP EF (46 << 2 = 0xB8), mapped by 802.11e WMM to AC_VO for low-jitter real-time control. */
+        const val TRAFFIC_CLASS_EXPEDITED = 0xB8
     }
 }
 

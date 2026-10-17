@@ -29,7 +29,10 @@ test('JPEG remains active until the browser actually decodes a video frame', asy
   assert.deepEqual(f.sent, [{ type: 'rtc-answer', id: 1, sdp: 'answer' }]);
   assert.equal(f.pc.appliedAnswer.sdp, 'a=setup:passive\r\n');
   assert.equal(f.receiver.active, false);
-  f.pc.ontrack({ streams: [{}] }); await Promise.resolve();
+  const rtpReceiver = {};
+  f.pc.ontrack({ receiver: rtpReceiver, streams: [{}] }); await Promise.resolve();
+  assert.equal(rtpReceiver.playoutDelayHint, 0);
+  assert.equal(rtpReceiver.jitterBufferTarget, 0);
   assert.equal(f.receiver.active, true); assert.equal(f.ready, 1);
   f.video.onloadeddata(); assert.equal(f.ready, 1);
   assert.equal(f.sent.at(-1).type, 'rtc-ready');

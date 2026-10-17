@@ -21,6 +21,7 @@ import android.graphics.Bitmap
 import android.graphics.drawable.Icon
 import android.media.session.MediaSession
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -30,6 +31,7 @@ import com.shilapi.xcertplay.host.R
 /** Keeps the connection and its media session alive while no dashboard is visible. */
 class DiPlaySessionService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private lateinit var media: CarPlayMediaSessionBridge
     private var sessionSubscription: AutoCloseable? = null
     private val main = Handler(Looper.getMainLooper())
@@ -81,8 +83,7 @@ class DiPlaySessionService : Service() {
             activationBlocked = true
             WebSession.stop()
             CarPlayBackgroundSession.stop()
-            wakeLock?.let { if (it.isHeld) it.release() }
-            wakeLock = null
+            releaseLocks()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -99,9 +100,25 @@ class DiPlaySessionService : Service() {
             if (!destroyed) WebSession.start(this)
             updateNotification()
             val acquireWakeLock = {
-                if (!destroyed && WebSession.running && wakeLock == null) {
-                    wakeLock = getSystemService(PowerManager::class.java)
-                        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WheelPlay:server").apply { acquire() }
+                if (!destroyed && WebSession.running) {
+                    if (wakeLock == null) {
+                        wakeLock = getSystemService(PowerManager::class.java)
+                            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WheelPlay:server").apply { acquire() }
+                    }
+                    if (wifiLock == null) {
+                        @Suppress("DEPRECATION")
+                        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        } else {
+                            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                        }
+                        wifiLock = getSystemService(WifiManager::class.java)
+                            ?.createWifiLock(mode, "WheelPlay:lowLatency")
+                            ?.apply {
+                                setReferenceCounted(false)
+                                runCatching { acquire() }
+                            }
+                    }
                 }
             }
             if (Looper.myLooper() == Looper.getMainLooper()) acquireWakeLock() else main.post { acquireWakeLock() }
@@ -161,13 +178,19 @@ class DiPlaySessionService : Service() {
         } else startForeground(NOTIFICATION_ID, notification)
     }
 
+    private fun releaseLocks() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+        wifiLock?.let { if (it.isHeld) runCatching { it.release() } }
+        wifiLock = null
+    }
+
     override fun onDestroy() {
         destroyed = true
         sessionSubscription?.close()
         media.close()
         runWebAction { WebSession.stop() }
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
+        releaseLocks()
         CarPlayBackgroundSession.stop()
         super.onDestroy()
     }

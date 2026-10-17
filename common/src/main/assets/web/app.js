@@ -272,6 +272,13 @@ export function createRtcReceiver(video, {
       };
       pc.ontrack = event => {
         if (!current()) return;
+        const receiver = event.receiver || (typeof pc.getReceivers === 'function'
+          ? pc.getReceivers().find(r => r && r.track === event.track)
+          : null);
+        if (receiver) {
+          try { receiver.playoutDelayHint = 0; } catch (_) {}
+          try { receiver.jitterBufferTarget = 0; } catch (_) {}
+        }
         video.onloadeddata = displayed;
         video.onerror = () => { if (current()) fallback(); };
         if (video.requestVideoFrameCallback && frameCallback === null) {
@@ -338,7 +345,7 @@ if (typeof document !== 'undefined') {
   let rtc = null, rtcRequested = false, rtcFps = null;
   let socket = null, stopped = true, paired = false, retry = null, attempts = 0;
   let width = 1280, height = 720, live = false, objectUrl = null, lastFrame = 0, lastStatus = 0;
-  let heartbeat = null, movePending = false, moveGeneration = 0, outbox = null;
+  let heartbeat = null, moveRaf = null, moveDirty = false, moveGeneration = 0, outbox = null;
   let authGeneration = 0, deviceCredential = null, storageAvailable = false;
   let launchPresentation = null;
   const devicePreference = 'wheelplay.browserDevice';
@@ -581,7 +588,27 @@ if (typeof document !== 'undefined') {
   }
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(scheduleViewportReport).observe(display);
   window.addEventListener('resize', scheduleViewportReport);
-  function cancelMove() { moveGeneration++; movePending = false; }
+  function cancelMove() {
+    moveGeneration++;
+    if (moveRaf !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(moveRaf);
+    moveRaf = null;
+    moveDirty = false;
+  }
+  function scheduleMoveGate() {
+    if (moveRaf !== null || typeof requestAnimationFrame !== 'function') return;
+    const generation = moveGeneration;
+    moveRaf = requestAnimationFrame(() => {
+      moveRaf = null;
+      if (generation !== moveGeneration) return;
+      if (!moveDirty || !pointers.size) {
+        moveDirty = false;
+        return;
+      }
+      moveDirty = false;
+      send({ type: 'touch', contacts: contacts() }, 'move');
+      scheduleMoveGate();
+    });
+  }
   function contacts() { return [...pointers.values()].map(p => ({ id: p.id, x: p.x, y: p.y, down: true })); }
   function release() { cancelMove(); pointers.clear(); send({ type: 'touch', contacts: [] }); }
   const statusElement = $('status');
@@ -1040,20 +1067,18 @@ if (typeof document !== 'undefined') {
     surface.setPointerCapture(event.pointerId);
     cancelMove();
     send({ type: 'touch', contacts: contacts() });
+    scheduleMoveGate();
   });
   surface.addEventListener('pointermove', event => {
     const p = pointers.get(event.pointerId); if (!p) return;
     const point = mapPoint(event.clientX, event.clientY, getSurfaceRect(surface), width, height, true);
     if (!point) return;
     Object.assign(p, point);
-    if (!movePending) {
-      movePending = true;
-      const generation = moveGeneration;
-      requestAnimationFrame(() => {
-        if (generation !== moveGeneration) return;
-        movePending = false;
-        if (pointers.size) send({ type: 'touch', contacts: contacts() }, 'move');
-      });
+    if (moveRaf !== null) {
+      moveDirty = true;
+    } else {
+      send({ type: 'touch', contacts: contacts() }, 'move');
+      scheduleMoveGate();
     }
   });
   function up(event) {

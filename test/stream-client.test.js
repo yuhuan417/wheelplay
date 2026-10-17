@@ -119,6 +119,25 @@ test('the overlay forwards a complete drag independently of the native video ele
   assert.deepEqual(ws.sent.filter(m => m.type === 'touch').map(m => m.contacts[0].down), [true, true, false]);
 });
 
+test('first pointermove in an open VSync window sends immediately on the leading edge while same-frame moves coalesce', async () => {
+  const f = fixture(), ws = await f.connect(); f.frame(ws);
+  f.pointer('pointerdown', 128, 'touch-surface');
+  f.flushMoves(); // VSync window after pointerdown closes with no pending move.
+  f.pointer('pointermove', 256, 'touch-surface');
+  const touchesAfterLeadingMove = ws.sent.filter(m => m.type === 'touch');
+  assert.equal(touchesAfterLeadingMove.length, 2, 'First move in an open VSync window must send immediately');
+  assert.equal(touchesAfterLeadingMove[1].contacts[0].x, 0.2);
+
+  // Subsequent moves in the same VSync window coalesce until the next rAF.
+  f.pointer('pointermove', 384, 'touch-surface');
+  f.pointer('pointermove', 512, 'touch-surface');
+  assert.equal(ws.sent.filter(m => m.type === 'touch').length, 2);
+  f.flushMoves();
+  const touchesAfterRaf = ws.sent.filter(m => m.type === 'touch');
+  assert.equal(touchesAfterRaf.length, 3);
+  assert.equal(touchesAfterRaf[2].contacts[0].x, 0.4);
+});
+
 test('the optional top bar persists in storage, stays visible while waiting for iPhone, hides when live, and returns to setup on host-ui', async () => {
   const f = fixture();
   f.element('hide-toolbar').checked = true;

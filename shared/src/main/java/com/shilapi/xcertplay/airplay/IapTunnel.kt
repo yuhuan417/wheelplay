@@ -120,6 +120,7 @@ class IapTunnel(
                 return
             }
             accepted.setSoLinger(true, 0)
+            runCatching { accepted.tcpNoDelay = true }
             socket = accepted
             readCounter.set(0)
             peerConnected.countDown()

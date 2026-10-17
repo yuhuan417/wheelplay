@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -186,6 +187,10 @@ class CarPlayController(
 
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val touchExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val touchQueue = TouchDispatchQueue(
+        scheduleDrain = touchExecutor::execute,
+        deliver = { contacts -> activeSession?.sendTouch(contacts) },
+    )
     private val tunnelExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val hostId = UUID.randomUUID().toString().uppercase(Locale.US)
@@ -225,6 +230,7 @@ class CarPlayController(
     private var permissionCloseable: Closeable? = null
     private var attachCloseable: Closeable? = null
     private var ch341PermissionCloseable: Closeable? = null
+    @Volatile private var wifiLock: WifiManager.WifiLock? = null
     private var vpnLatch = CountDownLatch(1)
     private val teardownComplete = CountDownLatch(1)
 
@@ -242,7 +248,10 @@ class CarPlayController(
 
     private val sessionListener = object : AirPlaySessionListener {
         override fun onSessionActive(session: AirPlaySession) {
-            if (activeSession !== session) BydNavigationOutputs.start(appContext)
+            if (activeSession !== session) {
+                touchQueue.reset()
+                BydNavigationOutputs.start(appContext)
+            }
             activeSession = session
             mediaState.resume()
             debugLog(
@@ -255,6 +264,7 @@ class CarPlayController(
         override fun onSessionEnded(session: AirPlaySession) {
             if (activeSession === session) {
                 activeSession = null
+                touchQueue.reset()
                 mediaState.disconnected()
                 BydNavigationOutputs.endNow()
             }
@@ -342,6 +352,21 @@ class CarPlayController(
         if (config.transport == CarPlayTransport.WIRED) {
             permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
             attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
+        } else if (wifiLock == null) {
+            @Suppress("DEPRECATION")
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = runCatching {
+                appContext.getSystemService(WifiManager::class.java)
+                    ?.createWifiLock(mode, "WheelPlay:carplayLowLatency")
+                    ?.apply {
+                        setReferenceCounted(false)
+                        acquire()
+                    }
+            }.getOrNull()
         }
         startMfi()
     }
@@ -366,14 +391,8 @@ class CarPlayController(
     }
 
     fun sendTouch(contacts: List<AirPlayContact>): Boolean {
-        if (closed) return false
-        val session = activeSession ?: return false
-        return try {
-            touchExecutor.execute { session.sendTouch(contacts) }
-            true
-        } catch (_: Exception) {
-            false
-        }
+        if (closed || activeSession == null) return false
+        return touchQueue.enqueue(contacts)
     }
 
     override fun close() {
@@ -381,6 +400,9 @@ class CarPlayController(
             if (closed) return
             closed = true
         }
+        touchQueue.close()
+        wifiLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        wifiLock = null
         mediaState.close()
         BydNavigationOutputs.endNow()
         closeReceivers()
