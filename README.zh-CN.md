@@ -46,13 +46,13 @@ WheelPlay 是一款 Android 局域网 CarPlay 服务端应用，可将 iPhone �
 
 ## Web 监听配置
 
-「设置 → Web 监听」集中配置 HTTP 端口（默认 `8080`）、HTTP / HTTPS 共用的自备 Web 域名和可选 HTTPS，无需 Root。实际监听端口范围为 `1024–65535`；打开 HTTPS 后显示 Web HTTPS 端口（默认 `8443`）及页面内的证书类型选择器：默认本地证书、PEM、PKCS#12。系统文件选择器支持 PEM 证书链＋私钥（含加密私钥），或 PKCS#12（`.p12` / `.pfx`，可选择私钥条目）。导入前验证证书与私钥，保存到 App 私有且不备份的存储；失败保留当前证书，端口绑定失败保留原监听器。关闭 HTTPS 仅停止 TLS 监听，保留配置与证书。详见 [Web 监听与证书说明](docs/BROWSER_AUDIO.md)。
+「设置 → Web 监听」集中配置 HTTP 端口（默认 `8080`）、HTTP / HTTPS 共用的自备 Web 域名和可选 HTTPS，无需 Root。实际监听端口范围为 `1024–65535`；打开 HTTPS 后显示 Web HTTPS 端口（默认 `8443`）。HTTPS 使用 App 管理的本地证书，不再提供证书类型选择；启用 Tesla 兼容中的 DuckDNS 后，签发的 Let's Encrypt 证书会自动替换它。关闭 HTTPS 仅停止 TLS 监听，保留配置与证书。详见 [Web 监听与证书说明](docs/BROWSER_AUDIO.md)。
 
 ## Tesla 兼容模式（实验）
 
 此模式主要帮助屏蔽私有网段访问的车机浏览器，通过兼容访问地址绕过地址限制，访问手机上的本地服务。功能名称沿用「Tesla 兼容」，也适用于有同类限制的其他品牌车机。
 
-在「设置 → Tesla 兼容（实验）→ 连接方案」选择 **免 Root VPN（实验）** 或 **Root 热点路由**。两种方案都默认关闭，切换方案会关闭模式，需重新主动启用；已有 Root 设置保留。
+在「设置 → Tesla 兼容（实验）→ 连接方案」选择 **免 Root VPN（实验）** 或 **Root 热点路由**。两种方案都默认关闭，切换方案会关闭模式，需重新主动启用；已有 Root 设置保留。DuckDNS 域名与自动证书也在此卡片中配置，并共用同一个访问地址。
 
 - **免 Root VPN**：无需 Root 或 Shizuku，需要 Android VPN 授权。开启手机系统热点，让车机连接后尝试 `http://6.6.6.6:8080`；直接使用 Web 监听端口，不映射 `80` / `443`。与 Web 服务共用一个 VPN 服务，保留 IPv4 地址接口。此方案利用公开 API 之外未保证的旧 TUN 保留行为，可能不兼容部分设备，系统更新后也可能失效。「地址已配置」仅表示本机检测到该地址，热点和 Tesla 访问仍需实测；WebCodecs 支持情况需单独验证。
 - **Root 热点路由**：内置适配 [VPN Hotspot](https://github.com/Mygod/VPNHotspot)，需要 `su`、`ip`、`iptables`。手动请求 Root 后启用，默认入口 `http://100.96.0.1/`；映射端口范围 `1–1023`，默认 `80` / `443`，转发到 Web 的高位监听端口。仅已启用的 Root 方案会在启动时后台检查 Root；免 Root 模式不请求 Root。Root 方案不申请 VPN 授权。
@@ -63,9 +63,9 @@ WheelPlay 是一款 Android 局域网 CarPlay 服务端应用，可将 iPhone �
 
 使用 Android NDK 28.2.13676358 和 CMake 3.22.1。首次构建会从 GitHub 获取固定版本的 Mbed TLS；后续复用本地 CMake 缓存。运行 `./gradlew :mobile:assembleDebug`。
 
-源码构建默认不包含 CarPlay 认证资源。未配置有效资源时不会启动 Web 服务或 CarPlay；导入校验通过后自动启动 Web 服务。包内自带有效资源的安装包可直接使用，仍允许用户导入替换，且用户资源优先。在 **设置 → CarPlay 认证资源** 中手动选择 `identity.pk8` 和 `certificate.p7b`，或通过下载入口获取 DiPlay 官网 APK，再选择“从 DiPlay APK 导入”；也可在文件管理器中将该 APK 分享给 WheelPlay，无需安装 DiPlay。导入在本机完成，校验私钥与证书匹配后才替换原有资源；资源保存在应用私有目录，不上传、不参与备份。详见 [认证资源导入说明](docs/AUTHENTICATION_IMPORT.md)。
+本部署已内置 CarPlay 认证资源，首次启动时复制到应用私有目录；设置页不再提供导入入口。源码构建必须通过下方构建期资产目录提供资源，否则 Web 与 CarPlay 保持禁用。
 
-开发者仍可通过 `WHEELPLAY_AUTH_ASSETS_DIR`（兼容 `DIPLAY_AUTH_ASSETS_DIR`）指定本地资产目录，或放置在 `.local/auth-assets/`；目录下必须有 `offline-mfi/identity.pk8` 和 `offline-mfi/certificate.p7b`。这些文件不纳入 Git。配置后运行 `./gradlew :mobile:assembleProvisionedDebug`，构建并校验 APK 内的两项资产与本地配置一致。公开分发的开源安装包请使用不配置认证资产的普通构建，由用户安装后导入。
+通过 `WHEELPLAY_AUTH_ASSETS_DIR`（兼容 `DIPLAY_AUTH_ASSETS_DIR`）指定本地资产目录，或放置在 `.local/auth-assets/`；目录下必须有 `offline-mfi/identity.pk8` 和 `offline-mfi/certificate.p7b`。这些文件不纳入 Git。配置后运行 `./gradlew :mobile:assembleProvisionedDebug`，构建并校验 APK 内的两项资产与本地配置一致。
 
 ## 来源与许可
 

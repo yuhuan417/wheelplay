@@ -7,7 +7,6 @@ import com.shilapi.xcertplay.network.TeslaHttpConfig
 internal object WebListenSettings {
     const val DEFAULT_HTTP_PORT = 8080
     const val DEFAULT_HTTPS_PORT = 8443
-    enum class CertificateType(val label: String) { DEFAULT("默认本地证书"), PEM("PEM"), PKCS12("PKCS#12") }
 
     @Synchronized internal fun migrate(context: Context) {
         val prefs = context.getSharedPreferences("web_listen", Context.MODE_PRIVATE)
@@ -46,10 +45,6 @@ internal object WebListenSettings {
     fun httpsEnabled(context: Context) = preferences(context).getBoolean("https_enabled", true)
     fun hostname(context: Context) = preferences(context).getString("hostname", "").orEmpty()
         .takeIf(TeslaHttpConfig::isHostname).orEmpty()
-    fun certificateType(context: Context) = runCatching {
-        CertificateType.valueOf(preferences(context).getString("certificate_type",
-            if (LanTls.hasCustom(context)) "PEM" else "DEFAULT")!!)
-    }.getOrDefault(CertificateType.DEFAULT)
     fun saveHttpPort(context: Context, port: Int) = savePort(context, "http_port", port)
     fun saveHttpsPort(context: Context, port: Int) = savePort(context, "https_port", port)
     private fun savePort(context: Context, key: String, port: Int) {
@@ -62,8 +57,5 @@ internal object WebListenSettings {
     fun saveHostname(context: Context, hostname: String) {
         require(TeslaHttpConfig.isHostname(hostname)) { "请输入域名，不要包含协议、端口或路径" }
         check(preferences(context).edit().putString("hostname", hostname).commit()) { "Web 域名保存失败" }
-    }
-    fun saveCertificateType(context: Context, type: CertificateType) {
-        check(preferences(context).edit().putString("certificate_type", type.name).commit()) { "证书类型保存失败" }
     }
 }

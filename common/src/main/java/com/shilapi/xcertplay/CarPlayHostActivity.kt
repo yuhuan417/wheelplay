@@ -2291,12 +2291,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun startCarPlay(size: DisplaySize) {
         if (CarPlayBackgroundSession.hasSession() && !CarPlayBackgroundSession.isOwner(this)) return
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress || controller != null) return
-        if (DiPlayBootstrap.importing) {
-            setConnectionStage("认证资源正在导入，请完成后重新连接")
-            return
-        }
         if (runCatching { DiPlayBootstrap.ensure(this) }.isFailure) {
-            setConnectionStage("认证资源未就绪，请到设置 → CarPlay 认证资源导入文件或 DiPlay APK")
+            setConnectionStage("内置认证资源不可用，请重新安装应用")
             return
         }
         if (CarPlayBackgroundSession.isUnpluggedOnBattery(this)) {

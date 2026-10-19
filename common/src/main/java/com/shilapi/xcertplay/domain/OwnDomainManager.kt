@@ -6,14 +6,14 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.AtomicFile
 import android.util.Log
+import com.shilapi.xcertplay.CarPlayBackgroundSession
 import com.shilapi.xcertplay.DiagnosticLogSink
+import com.shilapi.xcertplay.web.TeslaHttpCompatibility
 import com.shilapi.xcertplay.web.LanTls
 import com.shilapi.xcertplay.web.WebListenSettings
 import com.shilapi.xcertplay.web.WebSession
 import java.io.File
 import java.net.HttpURLConnection
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.net.URL
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -27,7 +27,6 @@ import java.security.spec.ECGenParameterSpec
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.text.SimpleDateFormat
-import java.util.Collections
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -55,10 +54,11 @@ internal object OwnDomainManager {
     private const val TAG = "wheelplay-domain"
     private const val RENEW_BEFORE_MILLIS = 30L * 24 * 60 * 60 * 1000
     private const val CHECK_INTERVAL_MILLIS = 6L * 60 * 60 * 1000
-    private const val RETRY_INTERVAL_MILLIS = 60L * 60 * 1000
+    private const val RETRY_MIN_MILLIS = 2L * 60 * 1000
+    private const val RETRY_MAX_MILLIS = 30L * 60 * 1000
     private const val RECORD_REFRESH_MILLIS = 6L * 60 * 60 * 1000
     private const val DEBOUNCE_MILLIS = 30_000L
-    private const val INTERNET_WAIT_MILLIS = 20_000L
+    private const val INTERNET_WAIT_MILLIS = 60_000L
 
     private val scheduler = Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task, "wheelplay-own-domain").apply { isDaemon = true }
@@ -68,6 +68,7 @@ internal object OwnDomainManager {
     @Volatile private var appContext: Context? = null
     @Volatile private var nextCheckAt = 0L
     @Volatile private var lastRunAt = 0L
+    @Volatile private var consecutiveFailures = 0
 
     fun ensureStarted(context: Context) {
         val app = context.applicationContext
@@ -104,6 +105,8 @@ internal object OwnDomainManager {
     }
 
     private fun runOnce(context: Context, force: Boolean) {
+        // Power-save standby has already torn down Wi-Fi; do not burn retries while parked.
+        if (CarPlayBackgroundSession.standby) return
         val now = System.currentTimeMillis()
         if (!force && now - lastRunAt < DEBOUNCE_MILLIS) return
         if (!busy.compareAndSet(false, true)) return
@@ -115,8 +118,9 @@ internal object OwnDomainManager {
                 return
             }
             config.validate()?.let { throw OwnDomainException(it) }
-            val address = config.addressOverride.ifBlank { localHotspotAddress() }
-                ?: throw OwnDomainException("找不到安卓热点/信号桥的 IPv4 地址，请在“解析地址”里手动填写")
+            // DuckDNS is the DNS/certificate part of Tesla compatibility: publish the same
+            // access address the car already uses for the HTTP/HTTPS listener.
+            val address = TeslaHttpCompatibility.config(context).accessAddress
             status = Status("检查中", "正在检查 DuckDNS 解析与证书", config.domain, address)
             val networks = awaitInternetNetworks(context)
             if (networks.isEmpty()) {
@@ -160,6 +164,7 @@ internal object OwnDomainManager {
                     install(context, stored)
                 }
                 status = ready(config, address, stored.cert, "")
+                consecutiveFailures = 0
                 nextCheckAt = System.currentTimeMillis() + CHECK_INTERVAL_MILLIS
                 log("certificate valid until ${date(stored.cert.notAfter)}; next check in 6h")
                 return
@@ -186,6 +191,7 @@ internal object OwnDomainManager {
             writeStored(context, next)
             install(context, next)
             status = ready(config, address, next.cert, "")
+            consecutiveFailures = 0
             nextCheckAt = System.currentTimeMillis() + CHECK_INTERVAL_MILLIS
             log("certificate issued; valid until ${date(next.cert.notAfter)}")
         } catch (error: Throwable) {
@@ -206,7 +212,18 @@ internal object OwnDomainManager {
                 certificateUntilMillis = status.certificateUntilMillis,
                 lastError = message,
             )
-            nextCheckAt = System.currentTimeMillis() + RETRY_INTERVAL_MILLIS
+            consecutiveFailures = (consecutiveFailures + 1).coerceAtMost(20)
+            val retryDelay = (RETRY_MIN_MILLIS shl (consecutiveFailures - 1))
+                .coerceAtMost(RETRY_MAX_MILLIS)
+            nextCheckAt = System.currentTimeMillis() + retryDelay
+            log("retrying in ${retryDelay / 1000}s")
+            scheduler.schedule(
+                {
+                    if (OwnDomainSettings.load(context).enabled) runOnce(context, force = true)
+                },
+                retryDelay,
+                TimeUnit.MILLISECONDS,
+            )
         } finally {
             busy.set(false)
         }
@@ -312,33 +329,6 @@ internal object OwnDomainManager {
         log("certificate installed into the HTTPS listener")
     }
 
-    private fun localHotspotAddress(): String? {
-        val interfaces = runCatching { NetworkInterface.getNetworkInterfaces() }.getOrNull() ?: return null
-        var best: Pair<Int, String>? = null
-        for (networkInterface in Collections.list(interfaces)) {
-            val name = networkInterface.name
-            if (!runCatching { networkInterface.isUp && !networkInterface.isLoopback }.getOrDefault(false)) continue
-            if (EXCLUDED.any { name.startsWith(it) }) continue
-            for (address in Collections.list(networkInterface.inetAddresses)) {
-                if (address !is Inet4Address) continue
-                val bytes = address.address
-                // Site-local addresses plus 100.64.0.0/10, which Tesla-focused setups use as a LAN.
-                val carrierGrade = bytes[0] == 100.toByte() && (bytes[1].toInt() and 0xC0) == 64
-                if (!address.isSiteLocalAddress && !carrierGrade) continue
-                var score = when {
-                    name.startsWith("ap") || name.contains("softap", ignoreCase = true) -> 100
-                    name.startsWith("p2p") -> 80
-                    name.startsWith("wlan") -> 70
-                    else -> 10
-                }
-                score += if (bytes[0] == 192.toByte() && bytes[1] == 168.toByte()) 30 else 20
-                val host = address.hostAddress ?: continue
-                if (best == null || score > best.first) best = score to host
-            }
-        }
-        return best?.second
-    }
-
     private data class Stored(val chain: ByteArray, val key: ByteArray, val cert: X509Certificate)
 
     private fun directory(context: Context) = File(context.noBackupFilesDir, "own-domain")
@@ -423,5 +413,4 @@ internal object OwnDomainManager {
 
     private class OwnDomainException(message: String) : Exception(message)
 
-    private val EXCLUDED = listOf("rmnet", "ccmni", "pdp", "dummy", "tun", "ppp", "lo")
 }

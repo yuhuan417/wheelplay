@@ -8,8 +8,6 @@ data class OwnDomainConfig(
     val subdomain: String = "",
     val token: String = "",
     val email: String = "",
-    /** Optional override for the address published in the A record; blank = auto-detect the AP/bridge. */
-    val addressOverride: String = "",
 ) {
     val domain: String get() = if (subdomain.isBlank()) "" else "$subdomain.duckdns.org"
 
@@ -18,7 +16,6 @@ data class OwnDomainConfig(
         !SUBDOMAIN.matches(subdomain) -> "DuckDNS 子域名只能包含小写字母、数字和连字符"
         !TOKEN.matches(token) -> "DuckDNS Token 格式不对，请在 duckdns.org 页面复制"
         email.isNotBlank() && !EMAIL.matches(email) -> "证书邮箱格式不对"
-        addressOverride.isNotBlank() && !isIpv4(addressOverride) -> "解析地址必须是 IPv4 地址"
         else -> null
     }
 
@@ -27,14 +24,6 @@ data class OwnDomainConfig(
         val TOKEN = Regex("[A-Za-z0-9-]{16,128}")
         val EMAIL = Regex("[^@\\s]+@[^@\\s]+\\.[^@\\s]+")
 
-        fun isIpv4(value: String): Boolean {
-            val parts = value.split('.')
-            if (parts.size != 4) return false
-            return parts.all { part ->
-                part.isNotEmpty() && part.length <= 3 && part.all(Char::isDigit) &&
-                    part.toIntOrNull()?.let { it in 0..255 } == true
-            }
-        }
     }
 }
 
@@ -44,7 +33,6 @@ internal object OwnDomainSettings {
     private const val KEY_SUBDOMAIN = "subdomain"
     private const val KEY_TOKEN = "token"
     private const val KEY_EMAIL = "email"
-    private const val KEY_ADDRESS = "address_override"
     private const val KEY_RECORD_ADDRESS = "record_address"
     private const val KEY_RECORD_AT = "record_at"
 
@@ -58,7 +46,6 @@ internal object OwnDomainSettings {
             subdomain = p.getString(KEY_SUBDOMAIN, "").orEmpty(),
             token = p.getString(KEY_TOKEN, "").orEmpty(),
             email = p.getString(KEY_EMAIL, "").orEmpty(),
-            addressOverride = p.getString(KEY_ADDRESS, "").orEmpty(),
         )
     }
 
@@ -68,7 +55,6 @@ internal object OwnDomainSettings {
             .putString(KEY_SUBDOMAIN, config.subdomain)
             .putString(KEY_TOKEN, config.token)
             .putString(KEY_EMAIL, config.email)
-            .putString(KEY_ADDRESS, config.addressOverride)
             .apply()
     }
 

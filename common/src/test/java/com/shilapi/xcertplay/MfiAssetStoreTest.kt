@@ -8,33 +8,19 @@ import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.math.BigInteger
 import java.security.KeyPairGenerator
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 
 class MfiAssetStoreTest {
     @get:Rule val temporary = TemporaryFolder()
     private val root get() = temporary.root
     private val store get() = MfiAssetStore(root)
-    private val keyPath = "assets/offline-mfi/identity.pk8"
-    private val certificatePath = "assets/offline-mfi/certificate.p7b"
-
     private fun identity() = SyntheticMfiIdentity.create()
 
     private fun install(value: SyntheticMfiIdentity.Identity) = store.installFiles({ value.key.inputStream() }, { value.certificate.inputStream() })
-    private fun apk(entries: Map<String, ByteArray>): ByteArray = ByteArrayOutputStream().apply {
-        ZipOutputStream(this).use { zip ->
-            entries.forEach { (path, bytes) ->
-                zip.putNextEntry(ZipEntry(path)); zip.write(bytes); zip.closeEntry()
-            }
-        }
-    }.toByteArray()
-    private fun apk(value: SyntheticMfiIdentity.Identity): ByteArray = apk(mapOf(keyPath to value.key, certificatePath to value.certificate))
     private fun assertOnlyInstalledResources() {
         assertEquals(listOf("offline-mfi"), root.list()!!.toList())
         assertEquals(setOf("identity.pk8", "certificate.p7b"), File(root, "offline-mfi").list()!!.toSet())
@@ -65,36 +51,6 @@ class MfiAssetStoreTest {
             assertFalse(store.exists())
             assertTrue(root.list()!!.isEmpty())
         }
-    }
-
-    @Test fun apkImportExtractsOnlyExactPathsAndDeletesTemporaryApk() {
-        val value = identity()
-        val bytes = apk(mapOf(keyPath to value.key, certificatePath to value.certificate,
-            "../escaped.txt" to "never extracted".toByteArray(), "classes.dex" to byteArrayOf(1, 2)))
-        store.installApk({ bytes.inputStream() })
-        assertArrayEquals(value.certificate, store.load().readCertificate())
-        assertOnlyInstalledResources()
-    }
-
-    @Test fun incompleteAndInvalidApksPreserveCurrentResources() {
-        val current = identity(); install(current)
-        val invalid = listOf(apk(mapOf(keyPath to current.key)), "not an APK".toByteArray(),
-            apk(mapOf("../$keyPath" to current.key, certificatePath to current.certificate)),
-            apk(mapOf(keyPath to ByteArray(16385), certificatePath to current.certificate)))
-        for (bytes in invalid) {
-            assertThrows(Exception::class.java) { store.installApk({ bytes.inputStream() }) }
-            assertArrayEquals(current.certificate, store.load().readCertificate())
-            assertOnlyInstalledResources()
-        }
-    }
-
-    @Test fun duplicateResourceEntriesAreRejected() {
-        val value = identity()
-        val bytes = apk(mapOf(keyPath to value.key, certificatePath to value.certificate,
-            "assets/offline-mfi/identity.pk9" to value.key))
-            .toString(Charsets.ISO_8859_1).replace("identity.pk9", "identity.pk8").toByteArray(Charsets.ISO_8859_1)
-        assertThrows(Exception::class.java) { store.installApk({ bytes.inputStream() }) }
-        assertTrue(root.list()!!.isEmpty())
     }
 
     @Test fun connectionStartingDuringImportPreventsCommit() {

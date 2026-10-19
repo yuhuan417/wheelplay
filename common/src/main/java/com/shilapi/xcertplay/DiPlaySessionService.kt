@@ -140,8 +140,7 @@ class DiPlaySessionService : Service() {
         updateNotification()
         // Foreground startup must be acknowledged even when an external start is rejected.
         // Never open listeners or acquire a wake lock without a validated identity.
-        if (!(DiPlayBootstrap.importing && WebSession.running) &&
-            runCatching { DiPlayBootstrap.ensure(this) }.isFailure) {
+        if (runCatching { DiPlayBootstrap.ensure(this) }.isFailure) {
             activationBlocked = true
             standby = false
             WebSession.stop()
@@ -182,9 +181,10 @@ class DiPlaySessionService : Service() {
         standby = false
         radioPowerOffVerified = null
         CarPlayBackgroundSession.standby = false
-        RootRadioPower.wakeFromStandby(this)
-        // Wi-Fi comes back with car power; a pending renewal can run now.
-        com.shilapi.xcertplay.domain.OwnDomainManager.requestCheck(this)
+        RootRadioPower.wakeFromStandby(this) {
+            // Wi-Fi is now up (or wake failed); retry DNS/certificate work after the radio.
+            com.shilapi.xcertplay.domain.OwnDomainManager.requestCheck(this, force = true)
+        }
         runWebAction {
             if (!destroyed) WebSession.start(this)
             updateNotification()

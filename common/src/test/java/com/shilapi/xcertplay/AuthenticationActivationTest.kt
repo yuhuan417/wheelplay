@@ -44,7 +44,7 @@ class AuthenticationActivationTest {
         assertNull(shadowOf(activity).nextStartedService)
         assertFalse(WebSession.running)
         assertFalse(CarPlayBackgroundSession.hasSession())
-        assertTrue(ui.filterIsInstance<TextView>().any { it.text.toString().contains("激活 Web 服务") })
+        assertTrue(ui.filterIsInstance<TextView>().any { it.text.toString().contains("认证资源不可用") })
         assertFalse(ui.filterIsInstance<Button>().single { it.text == "连接 iPhone" }.isEnabled)
         WebSession.start(app)
         assertFalse(WebSession.running)

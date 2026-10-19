@@ -167,27 +167,33 @@ class HttpsSettingsUiTest {
         } finally { RootAccess.authorize = original; controller.pause().stop().destroy(); WebSession.stop() }
     }
 
-    @Test fun flatCertificateTypesOpenTheSystemDocumentPickerWithoutRoot() {
+    @Test fun settingsMergeDuckDnsIntoTeslaAndHideAuthenticationSections() {
         val controller = Robolectric.buildActivity(DiPlayActivity::class.java).setup()
         val activity = controller.get()
         try {
             openSettings(activity)
-            assertEquals(listOf("默认本地证书", "PEM", "PKCS#12"),
-                all(activity).filterIsInstance<MaterialRadioButton>().map { it.text.toString() })
-            for ((type, title) in listOf("PEM" to "选择 PEM 证书与私钥", "PKCS#12" to "选择 PKCS#12 文件")) {
-                all(activity).filterIsInstance<MaterialRadioButton>().single { it.text.toString() == type }.performClick()
-                all(activity).filterIsInstance<MaterialButton>().single { it.text.toString() == title }.performClick()
-                shadowOf(android.os.Looper.getMainLooper()).idle()
-                val intent = shadowOf(activity).nextStartedActivity
-                assertEquals(Intent.ACTION_OPEN_DOCUMENT, intent.action)
-                assertTrue(intent.hasCategory(Intent.CATEGORY_OPENABLE))
-                assertEquals("*/*", intent.type)
-                assertFalse(RootAccess.granted)
-            }
+            val texts = all(activity).filterIsInstance<TextView>().map { it.text.toString() }
+            assertFalse(texts.any { it == "CarPlay 认证资源" })
+            assertFalse(texts.any { it.contains("本项目基于 DiPlay") })
+            assertFalse(texts.any { it == "证书类型" })
+            assertFalse(texts.any { it == "自己的域名（DuckDNS 自动证书）" })
+            assertFalse(texts.any { it == "解析地址（可选）" })
+            assertTrue(texts.any { it == "DuckDNS 域名与自动证书" })
+            assertTrue(texts.any { it == "Tesla 兼容（实验）" })
         } finally { controller.pause().stop().destroy(); WebSession.stop() }
     }
 
-    @Test fun httpsSwitchHidesItsPortAndCertificateTypesWhileHttpStaysInWebSection() {
+    @Test fun certificateTypeSelectorIsNotOffered() {
+        val controller = Robolectric.buildActivity(DiPlayActivity::class.java).setup()
+        val activity = controller.get()
+        try {
+            openSettings(activity)
+            assertTrue(all(activity).filterIsInstance<MaterialRadioButton>().isEmpty())
+            assertFalse(all(activity).filterIsInstance<TextView>().any { it.text.toString() == "证书类型" })
+        } finally { controller.pause().stop().destroy(); WebSession.stop() }
+    }
+
+    @Test fun httpsSwitchHidesItsPortWhileHttpStaysInWebSection() {
         val controller = Robolectric.buildActivity(DiPlayActivity::class.java).setup()
         val activity = controller.get()
         try {

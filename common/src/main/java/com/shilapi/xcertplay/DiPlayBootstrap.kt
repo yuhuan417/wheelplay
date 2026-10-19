@@ -4,15 +4,9 @@ import android.content.Context
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import java.security.MessageDigest
 
-/** Uses user-imported resources, with optional privately provisioned APK assets as a fallback. */
+/** Installs the bundled authentication resources into private storage on first use. */
 internal object DiPlayBootstrap {
-    private val importInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
-    val importing: Boolean get() = importInProgress.get()
-    @Synchronized fun beginImport(): Boolean = importInProgress.compareAndSet(false, true)
-    fun finishImport() { importInProgress.set(false) }
-
     @Synchronized fun ensure(context: Context) {
-        check(!importing) { "Authentication import in progress" }
         val store = MfiAssetStore(context.noBackupFilesDir)
         if (!store.exists()) {
             store.installFiles(

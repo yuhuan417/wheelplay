@@ -25,14 +25,10 @@ class OwnDomainConfigTest {
         assertNotNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = "has space in it").validate())
     }
 
-    @Test fun validatesTheOptionalEmailAndAddressOverride() {
+    @Test fun validatesTheOptionalEmail() {
         assertNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = token,
-            email = "driver@example.com", addressOverride = "192.168.1.30").validate())
+            email = "driver@example.com").validate())
         assertNotNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = token,
             email = "not-an-email").validate())
-        assertNotNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = token,
-            addressOverride = "192.168.1").validate())
-        assertNotNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = token,
-            addressOverride = "not-an-address").validate())
     }
 }
