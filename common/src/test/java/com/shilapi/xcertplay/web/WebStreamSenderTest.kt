@@ -211,4 +211,62 @@ class WebStreamSenderTest {
             assertEquals(listOf("one", "two"), sent)
         } finally { sender.close() }
     }
+
+    @Test fun webCodecsConfigPrecedesFramesAndBacklogWaitsForKeyframe() {
+        val executor = ManualExecutor()
+        val sent = mutableListOf<ByteArray>()
+        var backlogs = 0
+        val sender = WebStreamSender(
+            latestFrame = { null },
+            write = { sent.add(it.binaryPayload) },
+            onFailure = { fail() },
+            executor = executor,
+            now = { 0 },
+            onVideoBacklog = { backlogs++ },
+        )
+        try {
+            sender.videoConfig(byteArrayOf(-1))
+            sender.video(byteArrayOf(1), keyframe = true)
+            executor.runNext()
+            assertArrayEquals(byteArrayOf(-1), sent[0])
+            assertArrayEquals(byteArrayOf(1), sent[1])
+
+            // The socket is backed up: deltas fill the queue, overflow drops all of them.
+            for (index in 2..20) sender.video(byteArrayOf(index.toByte()), keyframe = false)
+            assertEquals(1, backlogs)
+            sender.video(byteArrayOf(21), keyframe = false)
+            executor.runNext()
+            assertEquals("A dropped chain waits for a keyframe", 2, sent.size)
+
+            sender.video(byteArrayOf(22), keyframe = true)
+            executor.runNext()
+            assertEquals(3, sent.size)
+            assertArrayEquals(byteArrayOf(22), sent.last())
+        } finally { sender.close() }
+    }
+
+    @Test fun webCodecsFramesAreQueuedWhileAWriterIsBlocked() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val sent = java.util.Collections.synchronizedList(mutableListOf<ByteArray>())
+        val sender = WebStreamSender(
+            latestFrame = { null },
+            write = {
+                if (it.binaryPayload[0] == 1.toByte()) { entered.countDown(); release.await(3, TimeUnit.SECONDS) }
+                sent.add(it.binaryPayload)
+            },
+            onFailure = { fail() },
+            now = { 0 },
+        )
+        try {
+            sender.video(byteArrayOf(1), keyframe = true)
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            for (index in 2..10) sender.video(byteArrayOf(index.toByte()), keyframe = index == 5)
+            release.countDown()
+            val deadline = System.currentTimeMillis() + 3000
+            while (sent.size < 10 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+            assertEquals(10, sent.size)
+            assertEquals("Frames stay in submission order", (1..10).map { it.toByte() }, sent.map { it[0] })
+        } finally { release.countDown(); sender.close() }
+    }
 }

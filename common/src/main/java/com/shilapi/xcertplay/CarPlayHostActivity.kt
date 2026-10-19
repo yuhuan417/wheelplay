@@ -1083,7 +1083,7 @@ class CarPlayHostActivity : ComponentActivity() {
         ) { streamTechnology = it }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(24) })
-        content.addView(menuText("WebRTC supports H.264 / HEVC passthrough and falls back to JPEG when unsupported by the browser. Set Frame rate to 60 for 60 fps. Changes take effect after closing settings.", 14f, MENU_SECONDARY),
+        content.addView(menuText("WebRTC supports H.264 / HEVC passthrough and falls back to JPEG when unsupported by the browser. WebCodecs sends the same compressed stream over the control WebSocket: it needs the HTTPS page and a browser with WebCodecs (Tesla Chrome 113+); H.265 also needs HEVC decode support. Set Frame rate to 60 for 60 fps. Changes take effect after closing settings.", 14f, MENU_SECONDARY),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { topMargin = dp(8); bottomMargin = dp(16) })
 
@@ -2785,7 +2785,7 @@ class CarPlayHostActivity : ComponentActivity() {
         // Capture this session's log: late decoder shutdown must not write into a new session.
         val diagnosticLog = sessionLog
         val videoGeneration = WebSession.beginVideo(videoWidth, videoHeight)
-        val source = com.shilapi.xcertplay.web.WebVideoSource(streamTechnology)
+        val source = com.shilapi.xcertplay.web.WebVideoSource(streamTechnology, videoWidth, videoHeight)
         val output = OffscreenVideoOutput(videoWidth, videoHeight,
             wanted = { WebSession.jpegReady && source.jpegNeeded },
             publish = { WebSession.publish(videoGeneration, it) })

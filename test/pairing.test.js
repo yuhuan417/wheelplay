@@ -4,9 +4,9 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 const source = readFileSync(new URL('../common/src/main/assets/web/browser-audio.js', import.meta.url), 'utf8')
-  .replaceAll('export function', 'function') + '\n' +
+  .replaceAll('export function', 'function').replaceAll('export const', 'const') + '\n' +
   readFileSync(new URL('../common/src/main/assets/web/app.js', import.meta.url), 'utf8')
-    .replace(/^import .*browser-audio\.js';$/m, '').replaceAll('export function', 'function');
+    .replace(/^import .*browser-audio\.js';$/m, '').replaceAll('export function', 'function').replaceAll('export const', 'const');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const savedDevice = { id: 'd'.repeat(32), secret: 's'.repeat(32), name: 'Chrome · Android' };
 const ok = data => ({ ok: true, json: async () => data });

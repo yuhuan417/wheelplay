@@ -70,7 +70,9 @@ export function createControlOutbox(socket, {
           if (kind === 'move' && tail && tail.kind === 'move') tail.json = json;
           else if (touches.length < 64) touches.push({ kind, json });
           else { fail(); return false; }
-        } else if (['rtc-start', 'rtc-answer', 'rtc-ready', 'rtc-fallback', 'phone-connect'].includes(data.type)) {
+        } else if (['rtc-start', 'rtc-answer', 'rtc-ready', 'rtc-fallback', 'webcodecs-start',
+          'webcodecs-ready', 'webcodecs-keyframe', 'webcodecs-fallback', 'webcodecs-unsupported',
+          'phone-connect'].includes(data.type)) {
           if (signals.length >= 8 || json.length > 32768) { fail(); return false; }
           signals.push(json);
         } else return false;
@@ -326,6 +328,306 @@ export function createRtcReceiver(video, {
   };
 }
 
+// Third transport: the phone forwards CarPlay's H.264/H.265 NAL units over the control
+// WebSocket and the browser decodes them with WebCodecs. This is not WebRTC: there is no
+// SDP/ICE/DTLS/SRTP, and the payload rides the same TCP socket as JPEG and audio. WebCodecs
+// is only exposed in a secure context, so this path requires the HTTPS page.
+export const WEBCODECS_VIDEO_MAGIC = 0x31435657; // "WVC1"
+
+/** Converts Annex B NAL units to the 4-byte length framing WebCodecs uses with avcC/hvcC. */
+export function annexBToAvcc(data) {
+  const units = [];
+  let offset = 0;
+  while (offset + 3 <= data.length) {
+    let start = -1;
+    if (data[offset] === 0 && data[offset + 1] === 0 && data[offset + 2] === 1) start = offset + 3;
+    else if (offset + 4 <= data.length && data[offset] === 0 && data[offset + 1] === 0 &&
+      data[offset + 2] === 0 && data[offset + 3] === 1) start = offset + 4;
+    if (start < 0) { offset += 1; continue; }
+    let next = data.length;
+    for (let scan = start; scan + 2 < data.length; scan += 1) {
+      if (data[scan] === 0 && data[scan + 1] === 0 && data[scan + 2] === 1) { next = scan; break; }
+      if (scan + 3 < data.length && data[scan] === 0 && data[scan + 1] === 0 &&
+        data[scan + 2] === 0 && data[scan + 3] === 1) { next = scan; break; }
+    }
+    if (next > start) units.push([start, next]);
+    offset = next;
+  }
+  if (units.length === 0) return data;
+  let total = 0;
+  for (const [start, end] of units) total += 4 + (end - start);
+  const output = new Uint8Array(total);
+  const view = new DataView(output.buffer);
+  let out = 0;
+  for (const [start, end] of units) {
+    view.setUint32(out, end - start);
+    out += 4;
+    output.set(data.subarray(start, end), out);
+    out += end - start;
+  }
+  return output;
+}
+
+function reverseBits32(value) {
+  let result = 0;
+  for (let index = 0; index < 32; index += 1) {
+    result = ((result << 1) | (value & 1)) >>> 0;
+    value >>>= 1;
+  }
+  return result >>> 0;
+}
+
+function hevcCodecCandidates(codecData, width, height) {
+  const candidates = [];
+  const base = (codec, description) => ({
+    config: {
+      codec,
+      description,
+      hardwareAcceleration: 'no-preference',
+      optimizeForLatency: true,
+      ...(width > 0 && height > 0 ? { codedWidth: width, codedHeight: height } : {}),
+    },
+    description: true,
+  });
+  if (codecData.length >= 13) {
+    const view = new DataView(codecData.buffer, codecData.byteOffset, codecData.byteLength);
+    const profileSpace = ['', 'A', 'B', 'C'][(codecData[1] >> 6) & 0x03] || '';
+    const tier = (codecData[1] & 0x20) !== 0 ? 'H' : 'L';
+    const profileIdc = codecData[1] & 0x1f;
+    const compatibility = reverseBits32(view.getUint32(2)) >>> 0;
+    const levelIdc = codecData[12];
+    const constraints = [];
+    for (let index = 6; index <= 11; index += 1) constraints.push(codecData[index]);
+    while (constraints.length > 0 && constraints[constraints.length - 1] === 0) constraints.pop();
+    const constraintHex = constraints.map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase();
+    const profile = `hvc1.${profileSpace}${profileIdc}.${compatibility.toString(16)}.${tier}${levelIdc}`;
+    if (constraintHex) candidates.push(base(`${profile}.${constraintHex}`, codecData.slice()));
+    candidates.push(base(profile, codecData.slice()));
+  }
+  // Last resort for firmware that hides the exact record; the browser rejects it if unsupported.
+  candidates.push(base('hvc1.1.6.L120.B0', codecData.slice()));
+  return candidates;
+}
+
+function h264CodecCandidate(codecData, width, height) {
+  const hasDescription = codecData.length > 4;
+  const hex = value => value.toString(16).padStart(2, '0');
+  return {
+    config: {
+      codec: hasDescription ? `avc1.${hex(codecData[1])}${hex(codecData[2])}${hex(codecData[3])}` : 'avc1.42E01E',
+      hardwareAcceleration: 'no-preference',
+      optimizeForLatency: true,
+      ...(hasDescription ? { description: codecData.slice() } : {}),
+      ...(width > 0 && height > 0 ? { codedWidth: width, codedHeight: height } : {}),
+    },
+    description: hasDescription,
+  };
+}
+
+export function createWebCodecsReceiver(canvas, {
+  send = () => {}, onReady = () => {}, onError = () => {}, onFrame = () => {},
+  createDecoder = init => new VideoDecoder(init),
+  schedule = setTimeout, cancel = clearTimeout, now = () => performance.now(),
+} = {}) {
+  let decoder = null, configured = false, usesDescription = false;
+  let generation = 0, ready = false, needKeyframe = true, failed = false;
+  let codec = 'H264', width = 0, height = 0, context = null;
+  let lastTimestamp = 0, lastPaintAt = 0, watchdog = null;
+  let lastCodecString = '', lastDescriptionBytes = 0, lastPtsUs = 0, lastFrameBytes = 0;
+  const probes = [];
+  const stats = { configs: 0, frames: 0, keyframes: 0, deltas: 0, dropped: 0, decoded: 0, errors: 0 };
+
+  function closeDecoder() {
+    const old = decoder;
+    decoder = null; configured = false;
+    if (old) { try { old.close(); } catch (_) {} }
+  }
+  function stopWatchdog() {
+    if (watchdog !== null) { cancel(watchdog); watchdog = null; }
+  }
+  function armWatchdog() {
+    stopWatchdog();
+    watchdog = schedule(() => {
+      watchdog = null;
+      if (!configured || failed) return;
+      const elapsed = now() - lastPaintAt;
+      if (elapsed > 3000) send({ type: 'webcodecs-keyframe' });
+      if (ready && elapsed > 10000) { fail('no decoded frame'); return; }
+      armWatchdog();
+    }, 2000);
+  }
+  // Everything the server needs to tell why the browser could not show the stream. This is
+  // written to the persistent diagnostic log, not only logcat.
+  function diagnostics(reason, error) {
+    return {
+      reason: String(reason || '').slice(0, 200),
+      codec, width, height,
+      codecString: lastCodecString,
+      descriptionBytes: lastDescriptionBytes,
+      configured,
+      decoderState: decoder ? decoder.state : null,
+      decodeQueueSize: decoder && Number.isFinite(decoder.decodeQueueSize) ? decoder.decodeQueueSize : null,
+      lastPtsUs,
+      lastFrameBytes,
+      canvas: { context: Boolean(context), width: canvas.width, height: canvas.height },
+      probes: probes.slice(0, 8),
+      stats: { ...stats },
+      lastPaintAgoMs: lastPaintAt ? Math.max(0, Math.round(now() - lastPaintAt)) : null,
+      secureContext: typeof window !== 'undefined' ? window.isSecureContext : null,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      error: error ? {
+        name: String(error.name || ''),
+        message: String(error.message || error).slice(0, 300),
+      } : null,
+    };
+  }
+  function fail(reason, error = null) {
+    if (failed) return;
+    failed = true;
+    ready = false;
+    const text = String(reason && reason.message ? reason.message : reason || 'decode failed').slice(0, 200);
+    const cause = error || (reason instanceof Error ? reason : null);
+    closeDecoder(); stopWatchdog();
+    stats.errors += 1;
+    onError(text);
+    send({ type: 'webcodecs-fallback', reason: text, detail: diagnostics(text, cause) });
+  }
+  function nextTimestamp(ptsUs) {
+    const wanted = Number.isFinite(ptsUs) ? Math.round(ptsUs) : lastTimestamp + 16667;
+    lastTimestamp = Math.max(lastTimestamp + 1, wanted);
+    return lastTimestamp;
+  }
+  function paint(frame, token) {
+    try {
+      if (token !== generation) return;
+      const frameWidth = frame.displayWidth || width || 0;
+      const frameHeight = frame.displayHeight || height || 0;
+      if (!frameWidth || !frameHeight) return;
+      if (!context) {
+        context = canvas.getContext('2d', { alpha: false }) || canvas.getContext('2d');
+        if (!context) throw new Error('Canvas 2D unavailable');
+      }
+      if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
+        canvas.width = frameWidth; canvas.height = frameHeight;
+      }
+      context.drawImage(frame, 0, 0, frameWidth, frameHeight);
+      width = frameWidth; height = frameHeight; lastPaintAt = now();
+      stats.decoded += 1;
+      if (!ready) { ready = true; onReady(); }
+      onFrame(frameWidth, frameHeight);
+    } catch (error) {
+      fail(error);
+    } finally {
+      try { frame.close(); } catch (_) {}
+    }
+  }
+  async function configure(message) {
+    const token = ++generation;
+    closeDecoder(); stopWatchdog();
+    failed = false; ready = false; needKeyframe = true;
+    codec = message.codec; width = message.width || 0; height = message.height || 0;
+    usesDescription = false;
+    stats.configs += 1; probes.length = 0; lastCodecString = ''; lastDescriptionBytes = 0;
+    const candidates = message.codec === 'H265'
+      ? hevcCodecCandidates(message.codecData, width, height)
+      : [h264CodecCandidate(message.codecData, width, height)];
+    // H.264 is the baseline every WebCodecs browser accepts; probing it would only delay the
+    // first keyframe. HEVC needs the probe because support varies by platform.
+    const probe = message.codec === 'H265' &&
+      typeof VideoDecoder !== 'undefined' && typeof VideoDecoder.isConfigSupported === 'function';
+    for (const candidate of candidates) {
+      if (token !== generation) return;
+      if (probe) {
+        const support = await VideoDecoder.isConfigSupported(candidate.config).catch(error => {
+          probes.push({ codec: candidate.config.codec, supported: false, error: String(error && error.message || error).slice(0, 120) });
+          return null;
+        });
+        if (token !== generation) return;
+        probes.push({ codec: candidate.config.codec, supported: support ? support.supported !== false : false });
+        if (!support || support.supported === false) continue;
+      } else {
+        probes.push({ codec: candidate.config.codec, supported: 'unprobed' });
+      }
+      let next = null;
+      try {
+        next = createDecoder({
+          output: frame => paint(frame, token),
+          error: error => { if (token === generation) fail(error); },
+        });
+        next.configure(candidate.config);
+        decoder = next; configured = true; usesDescription = candidate.description;
+        lastCodecString = candidate.config.codec;
+        lastDescriptionBytes = candidate.description && candidate.config.description
+          ? candidate.config.description.length : 0;
+        lastPaintAt = now();
+        armWatchdog();
+        // The keyframe may have arrived while an asynchronous codec probe was running.
+        send({ type: 'webcodecs-keyframe' });
+        return;
+      } catch (error) {
+        probes.push({ codec: candidate.config.codec, supported: 'configure failed',
+          error: String(error && error.message || error).slice(0, 120) });
+        try { next?.close?.(); } catch (_) {}
+      }
+    }
+    fail(message.codec === 'H265' ? 'H.265 decoder unavailable' : 'H.264 decoder unavailable');
+  }
+  function push(message) {
+    if (failed || !configured || !decoder) return;
+    stats.frames += 1;
+    if (message.keyframe) stats.keyframes += 1; else stats.deltas += 1;
+    if (needKeyframe && !message.keyframe) { stats.dropped += 1; return; }
+    if (message.keyframe) needKeyframe = false;
+    const data = usesDescription ? annexBToAvcc(message.data) : message.data;
+    if (!data || data.length === 0) return;
+    lastPtsUs = message.ptsUs;
+    lastFrameBytes = data.length;
+    if ((decoder.decodeQueueSize || 0) > 16) {
+      try { decoder.reset(); } catch (_) {}
+      needKeyframe = true;
+      stats.dropped += 1;
+      send({ type: 'webcodecs-keyframe' });
+      return;
+    }
+    try {
+      decoder.decode(new EncodedVideoChunk({
+        type: message.keyframe ? 'key' : 'delta',
+        timestamp: nextTimestamp(message.ptsUs),
+        data,
+      }));
+    } catch (error) { fail(error); }
+  }
+  function receive(buffer) {
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 16) return false;
+    const view = new DataView(buffer);
+    if (view.getUint32(0, true) !== WEBCODECS_VIDEO_MAGIC) return false;
+    const type = view.getUint8(4);
+    if (type === 1) {
+      if (buffer.byteLength < 21) return true;
+      void configure({
+        codec: view.getUint8(16) === 2 ? 'H265' : 'H264',
+        width: view.getUint32(8, true),
+        height: view.getUint32(12, true),
+        codecData: new Uint8Array(buffer, 20).slice(),
+      });
+    } else if (type === 2) {
+      push({
+        keyframe: (view.getUint8(6) & 1) === 1,
+        ptsUs: Number(view.getBigUint64(8, true)),
+        data: new Uint8Array(buffer, 16),
+      });
+    }
+    return true;
+  }
+  function close() {
+    generation += 1;
+    closeDecoder(); stopWatchdog();
+    ready = false; needKeyframe = true; failed = false; lastTimestamp = 0;
+  }
+  return { receive, close, get active() { return ready; }, get codec() { return codec; },
+    get width() { return width; }, get height() { return height; } };
+}
+
 import { createBrowserAudio } from './browser-audio.js';
 
 if (typeof document !== 'undefined') {
@@ -337,12 +639,19 @@ if (typeof document !== 'undefined') {
   let spare = $('screen-next');
   const video = $('video');
   const canvas = $('video-canvas');
+  const wcCanvas = $('wc-canvas');
   const display = $('display');
   const touchSurface = $('touch-surface');
   // Read-only diagnostic snapshots; counters never include pairing credentials or video payloads.
   const performanceStats = { source: null, transport: null, receiver: null };
   Object.defineProperty(window, 'wheelplayStats', { configurable: true, get: () => JSON.parse(JSON.stringify(performanceStats)) });
   let rtc = null, rtcRequested = false, rtcFps = null;
+  let webCodecs = null, webCodecsRequested = false, webCodecsHttpsNotified = false, webCodecsUnsupportedSent = false;
+  let webCodecsError = null;
+  // JPEG must not paint over a working WebRTC or WebCodecs picture.
+  function videoTransportActive() {
+    return Boolean((rtc && rtc.active) || (webCodecs && webCodecs.active));
+  }
   let socket = null, stopped = true, paired = false, retry = null, attempts = 0;
   let width = 1280, height = 720, live = false, objectUrl = null, lastFrame = 0, lastStatus = 0;
   let heartbeat = null, moveRaf = null, moveDirty = false, moveGeneration = 0, outbox = null;
@@ -674,7 +983,7 @@ if (typeof document !== 'undefined') {
       const nextBitmap = stagedBitmap, nextWs = stagedSocket;
       stagedBitmap = null;
       stagedSocket = null;
-      if (socket !== nextWs || nextWs.readyState !== WebSocket.OPEN || (rtc && rtc.active)) {
+      if (socket !== nextWs || nextWs.readyState !== WebSocket.OPEN || videoTransportActive()) {
         closeBitmap(nextBitmap);
         return;
       }
@@ -712,7 +1021,7 @@ if (typeof document !== 'undefined') {
     send({ type: 'ack' });
     const source = payload instanceof ArrayBuffer && typeof Blob !== 'undefined' ? new Blob([payload], { type: 'image/jpeg' }) : payload;
     Promise.resolve(createImageBitmap(source)).then(bitmap => {
-      if (token !== jpegGeneration || socket !== ws || ws.readyState !== WebSocket.OPEN || (rtc && rtc.active)) {
+      if (token !== jpegGeneration || socket !== ws || ws.readyState !== WebSocket.OPEN || videoTransportActive()) {
         closeBitmap(bitmap);
         if (pendingJpeg !== null && socket === ws && ws.readyState === WebSocket.OPEN) send({ type: 'ack' });
         jpegDecoding = false;
@@ -734,7 +1043,7 @@ if (typeof document !== 'undefined') {
         if (socket === ws) ws.close();
         return;
       }
-      if (pendingJpeg !== null && socket === ws && ws.readyState === WebSocket.OPEN && !(rtc && rtc.active)) {
+      if (pendingJpeg !== null && socket === ws && ws.readyState === WebSocket.OPEN && !videoTransportActive()) {
         const next = pendingJpeg;
         pendingJpeg = null;
         decodeJpegCanvas(ws, next);
@@ -758,8 +1067,36 @@ if (typeof document !== 'undefined') {
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = null;
   }
+  function hideWebCodecsSurface() {
+    wcCanvas.hidden = true;
+    if (jpegRendered) {
+      canvas.hidden = false;
+      screen.hidden = true;
+    } else if (screen.complete && screen.naturalWidth > 0) {
+      screen.hidden = false;
+    }
+  }
+  // WebCodecs is selected explicitly: on failure keep the error visible and do not fall back.
+  function webCodecsFailed(reason) {
+    if (webCodecs) webCodecs.close();
+    webCodecsRequested = false;
+    webCodecsError = reason;
+    wcCanvas.hidden = true;
+    canvas.hidden = true;
+    screen.hidden = true;
+    spare.hidden = true;
+    video.hidden = true;
+    setLive(false);
+    $('stage').textContent = `WebCodecs 失败：${reason}`;
+    $('waiting').hidden = false;
+    setStatus(`WebCodecs 失败 · 已停止（不回退 JPEG）：${reason}`, 60000);
+  }
   function cleanupRtc() {
     if (rtc) rtc.close(); rtc = null; rtcRequested = false; rtcFps = null;
+    if (webCodecs) webCodecs.close(); webCodecs = null;
+    webCodecsRequested = false; webCodecsHttpsNotified = false; webCodecsUnsupportedSent = false;
+    webCodecsError = null;
+    wcCanvas.hidden = true;
     canvasRenderer.stop();
     performanceStats.source = performanceStats.transport = performanceStats.receiver = null;
     if (jpegRendered) {
@@ -831,6 +1168,30 @@ if (typeof document !== 'undefined') {
       paired = true; attempts = 0; lastStatus = Date.now();
       browserAudio.attach();
       cleanupRtc();
+      webCodecs = createWebCodecsReceiver(wcCanvas, { send,
+        onReady: () => {
+          if (socket !== ws) return;
+          webCodecsError = null;
+          // The decoder has painted its first frame; JPEG can stop for this viewer.
+          stopJpegPipeline(false);
+          jpegRendered = false;
+          jpegContext = null;
+          canvas.hidden = true; screen.hidden = true; spare.hidden = true; video.hidden = true;
+          wcCanvas.hidden = false;
+          setLive(true);
+          send({ type: 'webcodecs-ready' });
+        },
+        onFrame: (frameWidth, frameHeight) => {
+          if (socket !== ws) return;
+          width = frameWidth; height = frameHeight; lastFrame = Date.now();
+          wcCanvas.hidden = false;
+          setLive(true);
+        },
+        onError: reason => {
+          if (socket !== ws) return;
+          webCodecsFailed(reason);
+        },
+      });
       rtc = createRtcReceiver(video, { send,
         onTrack: () => { if (useCanvas) canvasRenderer.prepare(); },
         onReset: () => { canvasRenderer.stop(); if (!jpegRendered) canvas.hidden = true; },
@@ -880,6 +1241,17 @@ if (typeof document !== 'undefined') {
           if (data.type === 'rtc-stop') rtcRequested = false;
           rtc.receive(data); return;
         }
+        if (data.type === 'webcodecs-stop') {
+          webCodecsRequested = false;
+          if (webCodecs) webCodecs.close();
+          hideWebCodecsSurface();
+          setLive(false);
+          return;
+        }
+        if (data.type === 'webcodecs-error') {
+          webCodecsFailed(data.reason || '解码失败');
+          return;
+        }
         if (data.type === 'phone-connect-result') {
           $('phone-connect').disabled = false;
           $('phone-connect-message').textContent = data.message;
@@ -902,11 +1274,40 @@ if (typeof document !== 'undefined') {
           }
           // The server resets availability when the iPhone starts a new video configuration.
           if (!data.rtcAvailable) rtcRequested = false;
-          setLive(Boolean(data.streaming && (rtc.active || lastFrame && (jpegRendered || screen.naturalWidth))));
+          if (data.webCodecsNeedsHttps && !webCodecsHttpsNotified) {
+            webCodecsHttpsNotified = true;
+            webCodecsFailed('需要 HTTPS 页面（WebCodecs 不在 HTTP 下提供）');
+          }
+          if (data.webCodecsAvailable && webCodecsError !== null) webCodecsError = null;
+          if (data.webCodecsError && data.webCodecsError !== webCodecsError) {
+            webCodecsFailed(data.webCodecsError);
+          }
+          if (data.webCodecsAvailable && typeof VideoDecoder !== 'undefined' && !webCodecsRequested &&
+            window.isSecureContext) {
+            webCodecsRequested = true; send({ type: 'webcodecs-start' });
+          }
+          if (data.webCodecsAvailable && typeof VideoDecoder === 'undefined' && !webCodecsUnsupportedSent) {
+            webCodecsUnsupportedSent = true;
+            send({ type: 'webcodecs-unsupported', reason: 'VideoDecoder requires HTTPS',
+              detail: {
+                userAgent: navigator.userAgent,
+                secureContext: window.isSecureContext,
+                videoDecoder: typeof VideoDecoder,
+                protocol: location.protocol,
+              } });
+          }
+          // The server resets availability when the iPhone starts a new video configuration.
+          if (!data.webCodecsAvailable) webCodecsRequested = false;
+          setLive(Boolean(data.streaming &&
+            (rtc.active || webCodecs?.active || lastFrame && (jpegRendered || screen.naturalWidth))));
           if (!live && !data.streaming) {
             $('topbar').hidden = Boolean(launchPresentation?.immersive);
           }
-          const transport = rtc.active ? `${rtc.codec === 'H265' ? 'HEVC' : 'H.264'} / WebRTC${useCanvas ? ' / Canvas' : ''}${rtcFps === null ? '' : ` · ${rtcFps} fps`}` : `JPEG${data.fallback ? ' · 已回退' : ''}`;
+          const transport = webCodecsError
+            ? 'WebCodecs 失败（不回退 JPEG）'
+            : webCodecs?.active
+              ? `${webCodecs.codec === 'H265' ? 'HEVC' : 'H.264'} / WebCodecs`
+              : rtc.active ? `${rtc.codec === 'H265' ? 'HEVC' : 'H.264'} / WebRTC${useCanvas ? ' / Canvas' : ''}${rtcFps === null ? '' : ` · ${rtcFps} fps`}` : `JPEG${data.fallback ? ' · 已回退' : ''}`;
           // A fallback is a one-shot event that the next JPEG frame would otherwise overwrite
           // within one frame interval, so hold it long enough to be read.
           setStatus(
@@ -918,7 +1319,8 @@ if (typeof document !== 'undefined') {
         return;
       }
       if (browserAudio.receive(event.data)) return;
-      if (rtc && rtc.active) { send({ type: 'ack' }); return; }
+      if (webCodecs && webCodecs.receive(event.data)) return;
+      if (videoTransportActive()) { send({ type: 'ack' }); return; }
       if (typeof createImageBitmap === 'function') {
         if (!jpegContext) {
           try {
@@ -946,7 +1348,7 @@ if (typeof document !== 'undefined') {
       target.onload = () => {
         target.onload = null; target.onerror = null;
         if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
-        if (rtc && rtc.active) { send({ type: 'ack' }); return; }
+        if (videoTransportActive()) { send({ type: 'ack' }); return; }
         target.hidden = false;
         screen.hidden = true; screen.removeAttribute('src');
         spare = screen; screen = target;
