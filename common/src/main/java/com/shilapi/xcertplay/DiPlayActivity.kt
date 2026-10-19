@@ -229,6 +229,7 @@ class DiPlayActivity : AppCompatActivity() {
             ?: if (setupError == null) "service" else "settings"
         createShell()
         startWebServiceIfReady()
+        com.shilapi.xcertplay.domain.OwnDomainManager.ensureStarted(this)
         handleWirelessRecovery()
         authenticationImport.state.observe(this) { state ->
             refreshAuthentication()
@@ -537,6 +538,7 @@ class DiPlayActivity : AppCompatActivity() {
                 certificateControls(card)
             }
         }
+        section(content, "自己的域名（DuckDNS 自动证书）") { card -> ownDomainControls(card) }
         section(content, "Tesla 兼容（实验）") { card ->
             renderedRootState = rootState()
             val config = TeslaHttpCompatibility.config(this)
@@ -975,6 +977,85 @@ class DiPlayActivity : AppCompatActivity() {
         }
         val identity = if (LanTls.hasCustom(this)) "当前使用自定义证书" else "当前使用默认本地证书"
         card.addView(label(identity + "。证书和私钥保存在 App 私有存储。PEM 依次选择证书链、私钥；PKCS#12 可选择私钥条目。", 14, MUTED))
+    }
+
+    private fun ownDomainControls(card: LinearLayout) {
+        val config = com.shilapi.xcertplay.domain.OwnDomainSettings.load(this)
+        toggle(card, "启用 DuckDNS 域名与自动证书",
+            "通过 DuckDNS 的 DNS-01 验证向 Let's Encrypt 申请正式证书，到期前 30 天自动续签；需要设备能访问 DuckDNS 和 Let's Encrypt。",
+            config.enabled) { enabled ->
+            val next = config.copy(enabled = enabled)
+            val problem = next.validate()
+            if (problem != null) { toast(problem); render(); return@toggle }
+            com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next)
+            if (enabled) {
+                com.shilapi.xcertplay.domain.OwnDomainManager.ensureStarted(this)
+                com.shilapi.xcertplay.domain.OwnDomainManager.requestCheck(this, force = true)
+            }
+            render()
+        }
+        card.addView(ui.preference("DuckDNS 子域名", config.subdomain.ifBlank { "未设置" }) {
+            textInput("DuckDNS 子域名", config.subdomain, false) { value ->
+                val next = config.copy(subdomain = value.trim().lowercase(Locale.ROOT)
+                    .removeSuffix(".duckdns.org").trim('.'))
+                val problem = next.validate()
+                if (problem != null) toast(problem) else {
+                    com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
+                }
+            }
+        })
+        card.addView(ui.preference("DuckDNS Token", if (config.token.isBlank()) "未设置" else "已设置") {
+            textInput("DuckDNS Token", config.token, true) { value ->
+                val next = config.copy(token = value.trim())
+                val problem = next.validate()
+                if (problem != null) toast(problem) else {
+                    com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
+                }
+            }
+        })
+        card.addView(ui.preference("证书通知邮箱（可选）", config.email.ifBlank { "未设置" }) {
+            textInput("证书通知邮箱（可选）", config.email, false) { value ->
+                val next = config.copy(email = value.trim())
+                val problem = next.validate()
+                if (problem != null) toast(problem) else {
+                    com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
+                }
+            }
+        })
+        card.addView(ui.preference("解析地址（可选）", config.addressOverride.ifBlank { "自动检测热点地址" }) {
+            textInput("解析地址（可选）", config.addressOverride, false) { value ->
+                val next = config.copy(addressOverride = value.trim())
+                val problem = next.validate()
+                if (problem != null) toast(problem) else {
+                    com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
+                }
+            }
+        })
+        val status = com.shilapi.xcertplay.domain.OwnDomainManager.status
+        card.addView(label(buildString {
+            append(status.phase)
+            if (status.domain.isNotBlank()) append(" · ").append(status.domain)
+            if (status.address.isNotBlank()) append("\n解析地址：").append(status.address)
+            status.certificateUntilMillis?.let {
+                append("\n证书有效期至：").append(SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it)))
+            }
+            if (status.message.isNotBlank()) append("\n").append(status.message)
+            status.lastError?.let { append("\n错误：").append(it) }
+        }, 14, if (status.lastError == null) MUTED else WARNING))
+        card.addView(button("立即检查 / 申请证书", false) {
+            com.shilapi.xcertplay.domain.OwnDomainManager.requestCheck(this, force = true)
+            toast("已开始检查；完成后重新进入设置查看状态")
+        }, ui.secondaryButtonLayout(12))
+        card.addView(button("刷新状态", false) { render() }, ui.secondaryButtonLayout(8))
+        card.addView(label(buildString {
+            append("证书安装后会替换当前自定义 HTTPS 证书并重启 HTTPS 监听。")
+            if (!WebListenSettings.httpsEnabled(this@DiPlayActivity)) append("当前 HTTPS 未启用，申请到的证书会先保存，启用 HTTPS 后生效。")
+            append("车机请打开 https://")
+            append(config.domain.ifBlank { "<子域名>.duckdns.org" })
+            append(':').append(WebListenSettings.httpsPort(this@DiPlayActivity)).append("/。")
+            append("Token 仅保存在应用私有存储，不会写入诊断日志。")
+            append("停用后不会自动恢复默认证书，可在上方“证书类型”中恢复。")
+        }, 14, MUTED))
     }
 
     private fun saveTeslaMapping(value: String, https: Boolean) {

@@ -65,6 +65,16 @@ internal object LanTls {
     private fun customFile(context: Context) = AtomicFile(File(context.noBackupFilesDir, "browser-server-custom.p12"))
     fun hasCustom(context: Context) = customFile(context).baseFile.exists()
 
+    /** The certificate currently stored for the HTTPS listener, or null when the default CA is used. */
+    @Synchronized fun customCertificate(context: Context): X509Certificate? = runCatching {
+        val file = customFile(context)
+        if (!file.baseFile.exists()) return null
+        val store = KeyStore.getInstance("PKCS12")
+        file.openRead().use { store.load(it, CharArray(0)) }
+        val alias = store.aliases().toList().firstOrNull { store.isKeyEntry(it) } ?: return null
+        store.getCertificate(alias) as? X509Certificate
+    }.getOrNull()
+
     @Synchronized fun create(context: Context, addresses: List<String>, hostname: String = ""): Endpoint {
         val file = customFile(context)
         if (file.baseFile.exists()) {
