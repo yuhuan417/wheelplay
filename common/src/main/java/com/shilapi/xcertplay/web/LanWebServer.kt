@@ -263,8 +263,13 @@ internal class LanWebServer(private val context: Context, private val code: Stri
         private fun reconcileVideo() = synchronized(videoLock) {
             val source = WebSession.videoSource
             val nextConfig = source?.webCodecsConfig
-            if (webCodecsSource !== source || webCodecsConfig !== nextConfig) {
-                stopWebCodecs()
+            val sourceChanged = webCodecsSource !== source
+            val configChanged = webCodecsConfig !== nextConfig
+            if (sourceChanged || configChanged) {
+                stopWebCodecs(
+                    reason = "sourceChanged=$sourceChanged configChanged=$configChanged " +
+                        "type=${nextConfig?.type} codec=${nextConfig?.codec}",
+                )
                 webCodecsSource = source; webCodecsConfig = nextConfig; webCodecsAttempted = false
                 webCodecsError = null
             }
@@ -299,6 +304,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
             webCodecsError = null
             val viewer = WebCodecsViewer(source, config)
             if (!source.attachWebCodecs(viewer, config)) { webCodecsAttempted = false; return }
+            WebSession.webCodecsActive = false
             webCodecs = viewer
             sender.videoConfig(WebCodecsWire.config(config.type, config.codec, config.width, config.height, config.codecData))
             source.requestKeyframe(force = true)
@@ -308,10 +314,17 @@ internal class LanWebServer(private val context: Context, private val code: Stri
             )
         }
 
-        private fun stopWebCodecs(notifyBrowser: Boolean = true) = synchronized(videoLock) {
+        private fun stopWebCodecs(
+            notifyBrowser: Boolean = true,
+            reason: String = "requested",
+        ) = synchronized(videoLock) {
+            com.shilapi.xcertplay.DiagnosticLogSink.append(
+                "WebCodecs stop: $reason notify=$notifyBrowser",
+            )
             val old = webCodecs
             webCodecs = null
             webCodecsActive = false
+            WebSession.webCodecsActive = false
             old?.detached = true
             if (old != null) {
                 webCodecsSource?.detachWebCodecs(old)
@@ -331,6 +344,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
             val viewer = webCodecs
             webCodecs = null
             webCodecsActive = false
+            WebSession.webCodecsActive = false
             webCodecsAttempted = true
             viewer?.detached = true
             if (viewer != null) webCodecsSource?.detachWebCodecs(viewer)
@@ -502,6 +516,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                     "webcodecs-ready" -> synchronized(videoLock) {
                         val viewer = webCodecs ?: return@synchronized
                         webCodecsActive = true
+                        WebSession.webCodecsActive = true
                         webCodecsSource?.displayed(viewer)
                         com.shilapi.xcertplay.DiagnosticLogSink.append(
                             "WebCodecs video displayed by the browser (${viewer.config.codec})",

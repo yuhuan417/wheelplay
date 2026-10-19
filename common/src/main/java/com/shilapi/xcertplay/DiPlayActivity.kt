@@ -610,8 +610,15 @@ class DiPlayActivity : AppCompatActivity() {
                 WebSession.setBrowserAudioPlayback(this, outputs[it] == CarPlayAudioOutput.BROWSER)
                 refreshAudioRoutes()
             }
+            toggle(card, "CarPlay 仅视频（音频由 iPhone 输出）",
+                "不再向 iPhone 声明 CarPlay 音频输出能力，音频由 iPhone 自身路由（例如已配对的蓝牙车机）；修改后重新连接生效。",
+                AirPlayPersistence.loadDisableAudioOutput(this)) { enabled ->
+                AirPlayPersistence.saveDisableAudioOutput(this, enabled)
+                reconnectForPreference()
+                refreshAudioRoutes()
+            }
             audioOutputStatus = label("", 14, MUTED).also(card::addView)
-            card.addView(label("即时切换。浏览器未就绪或离线时回退 Android；浏览器可能需要点击页面才能播放声音。", 14, MUTED))
+            card.addView(label("即时切换。浏览器未就绪或离线时回退 Android；浏览器可能需要点击页面才能播放声音。开启“仅视频”后此选项不再生效。", 14, MUTED))
             val microphones = CarPlayMicrophoneSource.entries
             experienceChoice(card, "麦克风来源", microphones.map { it.label },
                 microphones.indexOf(AirPlayPersistence.loadMicrophoneSource(this)), reconnect = true) {
@@ -697,6 +704,7 @@ class DiPlayActivity : AppCompatActivity() {
     private fun refreshAudioRoutes() {
         val session = CarPlayBackgroundSession.snapshot()
         audioOutputStatus?.text = when {
+            AirPlayPersistence.loadDisableAudioOutput(this) -> "当前输出：iPhone 自身（CarPlay 仅视频）"
             session == null -> "当前：未连接 iPhone"
             AirPlayPersistence.loadBrowserAudioPlayback(this) && WebSession.audio.playbackReady && session.sink.isRemoteMediaAvailable() -> "当前输出：车机浏览器"
             AirPlayPersistence.loadBrowserAudioPlayback(this) -> "当前输出：Android（浏览器尚未就绪或已离线）"

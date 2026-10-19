@@ -48,6 +48,7 @@ object AirPlayPersistence {
     private const val KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar"
     private const val KEY_ADAPTIVE_BROWSER_SIZE = "adaptive_browser_size"
     private const val KEY_BROWSER_AUDIO_PLAYBACK = "browser_audio_playback"
+    private const val KEY_DISABLE_AUDIO_OUTPUT = "disable_audio_output"
     private const val KEY_BROWSER_MICROPHONE = "browser_microphone"
     private const val KEY_MICROPHONE_SOURCE = "microphone_source"
     private const val KEY_APPEARANCE = "carplay_appearance"
@@ -66,6 +67,15 @@ object AirPlayPersistence {
     fun saveBrowserAudioPlayback(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_BROWSER_AUDIO_PLAYBACK, enabled).apply()
+    }
+
+    fun loadDisableAudioOutput(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_DISABLE_AUDIO_OUTPUT, false)
+
+    fun saveDisableAudioOutput(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_DISABLE_AUDIO_OUTPUT, enabled).apply()
     }
 
     fun loadBrowserMicrophone(context: Context): Boolean = loadMicrophoneSource(context) == CarPlayMicrophoneSource.BROWSER

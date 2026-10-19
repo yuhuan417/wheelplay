@@ -77,6 +77,9 @@ internal class WebVideoSource(
             VideoCodec.H265 -> validHevcConfig(data)
         }
         if (!valid) return
+        com.shilapi.xcertplay.DiagnosticLogSink.append(
+            "WebCodecs config accepted: codec=$codec type=$type bytes=${data.size}",
+        )
         webCodecsConfig = WebCodecsConfig(type, codec, data.copyOf(), displayWidth, displayHeight)
         lastConfig = data.copyOf()
         lastConfigType = type
@@ -172,6 +175,7 @@ internal class WebVideoSource(
     }
 
     @Synchronized override fun stopped(type: Int) {
+        com.shilapi.xcertplay.DiagnosticLogSink.append("WebCodecs source stopped: type=$type")
         if (webCodecsConfig?.type == type) {
             detachAll()
             webCodecsConfig = null

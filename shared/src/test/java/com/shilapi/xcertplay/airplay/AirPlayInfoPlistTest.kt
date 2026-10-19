@@ -49,6 +49,23 @@ class AirPlayInfoPlistTest {
     }
 
     @Test
+    fun disablingAudioOutputRemovesAudioCapabilities() {
+        val base = AirPlayConfig(
+            deviceName = "test",
+            deviceId = "02:00:00:00:00:02",
+            btMac = "02:00:00:00:00:02",
+            sourceVersion = "366.0",
+            main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+            microphone = true,
+        )
+
+        val info = AirPlayInfoPlist.build(base.copy(disableAudioOutput = true))
+
+        assertFalse(info.containsKey("audioFormats"))
+        assertFalse(info.containsKey("audioLatencies"))
+    }
+
+    @Test
     fun drivingSideAndDisplayValuesAreAdvertised() {
         val info = AirPlayInfoPlist.build(
             AirPlayConfig(

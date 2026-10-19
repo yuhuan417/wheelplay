@@ -23,6 +23,8 @@ internal object WebSession {
     @Volatile var height = 720
         private set
     @Volatile var videoActive = false
+    /** True after the browser reported that WebCodecs decoded and displayed a frame. */
+    @Volatile var webCodecsActive = false
     @Volatile var stage = "等待连接 iPhone"
     @Volatile var error: String? = null
         private set
@@ -386,7 +388,7 @@ internal object WebSession {
 
     @Synchronized fun beginVideo(w: Int, h: Int): Long {
         videoSource?.detach(); videoSource = null; jpegDemandListener = null
-        width = w; height = h; frame = null; videoActive = false
+        width = w; height = h; frame = null; videoActive = false; webCodecsActive = false
         return ++generation
     }
     @Synchronized fun attachVideoSource(owner: Long, source: WebVideoSource, onJpegDemand: (() -> Unit)? = null) {
@@ -407,7 +409,7 @@ internal object WebSession {
     }
     @Synchronized fun endVideo(owner: Long) { if (owner == generation) {
         videoSource?.detach(); videoSource = null; jpegDemandListener = null
-        generation++; frame = null; videoActive = false
+        generation++; frame = null; videoActive = false; webCodecsActive = false
     } }
     @Synchronized fun stop() {
         experienceContext = null
@@ -423,7 +425,7 @@ internal object WebSession {
         val old = server; server = null
         runCatching { old?.stop() }.exceptionOrNull()?.let { error = it.message }
         browserViewport = null
-        frame = null; videoActive = false; code = ""; generation++
+        frame = null; videoActive = false; webCodecsActive = false; code = ""; generation++
     }
 
     fun inspectPairing(payload: String) = server?.pairing?.inspect(payload)

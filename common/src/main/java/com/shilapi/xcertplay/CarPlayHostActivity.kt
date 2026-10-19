@@ -193,6 +193,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var hevcSoftwareDecoderEnabled = false
     private var advancedAudioChannelMappingSupported = false
     private var advancedAudioChannelMapping = false
+    private var disableAudioOutput = false
     private var debugLogsEnabled = false
     private var autoStartOnBoot = false
     private var model = AirPlayPersistence.DEFAULT_MODEL
@@ -354,6 +355,7 @@ class CarPlayHostActivity : ComponentActivity() {
         advancedAudioChannelMapping =
             advancedAudioChannelMappingSupported &&
                 AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
+        disableAudioOutput = AirPlayPersistence.loadDisableAudioOutput(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
         autoStartOnBoot = AirPlayPersistence.loadAutoStartOnBoot(this)
         model = AirPlayPersistence.loadModel(this)
@@ -628,14 +630,32 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(12) },
         )
 
+        content.addView(
+            settingsCategoryHeader("Audio"),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(36) },
+        )
+        content.addView(
+            settingsSwitchRow(
+                label = "CarPlay video only (iPhone audio)",
+                checked = disableAudioOutput,
+                description = "Do not advertise CarPlay audio output; route iPhone audio over its own Bluetooth connection",
+            ) { checked ->
+                disableAudioOutput = checked
+                appendLog(
+                    "CarPlay video-only audio ${if (checked) "enabled" else "disabled"}; " +
+                        "applies when settings close",
+                )
+                updateResolutionMenu()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
         if (advancedAudioChannelMappingSupported) {
-            content.addView(
-                settingsCategoryHeader("Audio"),
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(36) },
-            )
             content.addView(
                 settingsSwitchRow(
                     label = "Advanced audio channel mapping",
@@ -1082,6 +1102,7 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveManualHotspotSecurity(this, manualHotspotSecurity)
         AirPlayPersistence.saveAutoStartOnBoot(this, autoStartOnBoot)
         AirPlayPersistence.saveAdvancedAudioChannelMapping(this, advancedAudioChannelMapping)
+        AirPlayPersistence.saveDisableAudioOutput(this, disableAudioOutput)
         AirPlayPersistence.saveDisplayScaleTenths(this, displayScaleTenths)
         AirPlayPersistence.saveFps(this, fps)
         AirPlayPersistence.saveStreamTechnology(this, streamTechnology)
@@ -1920,6 +1941,7 @@ class CarPlayHostActivity : ComponentActivity() {
             main = display,
             rightHandDrive = rightHandDrive,
             hevc = hevcEnabled,
+            disableAudioOutput = disableAudioOutput,
             microphone = AirPlayPersistence.loadMicrophoneSource(this) != CarPlayMicrophoneSource.DISABLED,
             manufacturer = AirPlayPersistence.DEFAULT_MANUFACTURER_NAME,
             model = normalizedModel(),
@@ -2096,7 +2118,7 @@ class CarPlayHostActivity : ComponentActivity() {
         val first = Runnable {
             videoWatchdog = null
             if (shuttingDown.get() || controllerGeneration != restartGeneration ||
-                activeAirPlaySession !== session || videoFrameSeen
+                activeAirPlaySession !== session || videoFrameSeen || WebSession.webCodecsActive
             ) return@Runnable
             Thread(
                 {
@@ -2105,7 +2127,8 @@ class CarPlayHostActivity : ComponentActivity() {
                     }.getOrDefault(false)
                     runOnUiThread {
                         if (shuttingDown.get() || controllerGeneration != restartGeneration ||
-                            activeAirPlaySession !== session || videoFrameSeen
+                            activeAirPlaySession !== session || videoFrameSeen ||
+                            WebSession.webCodecsActive
                         ) return@runOnUiThread
                         appendLog(
                             "AirPlay session active but no video after " +

@@ -397,7 +397,7 @@ if (typeof document !== 'undefined') {
   const performanceStats = { source: null, transport: null };
   Object.defineProperty(window, 'wheelplayStats', { configurable: true, get: () => JSON.parse(JSON.stringify(performanceStats)) });
   let webCodecs = null, webCodecsRequested = false, webCodecsHttpsNotified = false, webCodecsUnsupportedSent = false;
-  let webCodecsError = null;
+  let webCodecsError = null, webCodecsStopTimer = null;
   // JPEG must not paint over a working WebCodecs picture.
   function videoTransportActive() {
     return Boolean(webCodecs && webCodecs.active);
@@ -819,6 +819,18 @@ if (typeof document !== 'undefined') {
       screen.hidden = false;
     }
   }
+  // A reconfiguration briefly stops the decoder. Keep the last decoded frame on screen while
+  // the replacement config/keyframe arrives; only hide the surface if it really stays stopped.
+  function scheduleWebCodecsHide() {
+    clearTimeout(webCodecsStopTimer);
+    webCodecsStopTimer = setTimeout(() => {
+      webCodecsStopTimer = null;
+      if (!webCodecs || !webCodecs.active) {
+        hideWebCodecsSurface();
+        setLive(false);
+      }
+    }, 3000);
+  }
   // WebCodecs is selected explicitly: on failure keep the error visible and do not fall back.
   function webCodecsFailed(reason) {
     if (webCodecs) webCodecs.close();
@@ -834,6 +846,7 @@ if (typeof document !== 'undefined') {
     setStatus(`WebCodecs 失败 · 已停止（不回退 JPEG）：${reason}`, 60000);
   }
   function cleanupVideoTransports() {
+    clearTimeout(webCodecsStopTimer); webCodecsStopTimer = null;
     if (webCodecs) webCodecs.close(); webCodecs = null;
     webCodecsRequested = false; webCodecsHttpsNotified = false; webCodecsUnsupportedSent = false;
     webCodecsError = null;
@@ -909,6 +922,7 @@ if (typeof document !== 'undefined') {
       webCodecs = createWebCodecsReceiver(wcCanvas, { send,
         onReady: () => {
           if (socket !== ws) return;
+          clearTimeout(webCodecsStopTimer); webCodecsStopTimer = null;
           webCodecsError = null;
           // The decoder has painted its first frame; JPEG can stop for this viewer.
           stopJpegPipeline(false);
@@ -954,8 +968,9 @@ if (typeof document !== 'undefined') {
         if (data.type === 'webcodecs-stop') {
           webCodecsRequested = false;
           if (webCodecs) webCodecs.close();
-          hideWebCodecsSurface();
-          setLive(false);
+          // Keep the last frame visible; the server normally sends a new config and keyframe
+          // immediately after a source/codec reconfiguration.
+          scheduleWebCodecsHide();
           return;
         }
         if (data.type === 'webcodecs-error') {
@@ -1002,8 +1017,11 @@ if (typeof document !== 'undefined') {
           }
           // The server resets availability when the iPhone starts a new video configuration.
           if (!data.webCodecsAvailable) webCodecsRequested = false;
+          const recentWebCodecsFrame = webCodecs !== null && lastFrame > 0 &&
+            Date.now() - lastFrame < 3000 && webCodecsError === null;
           setLive(Boolean(data.streaming &&
-            (webCodecs?.active || lastFrame && (jpegRendered || screen.naturalWidth))));
+            (webCodecs?.active || lastFrame && (jpegRendered || screen.naturalWidth))) ||
+            recentWebCodecsFrame);
           if (!live && !data.streaming) {
             $('topbar').hidden = Boolean(launchPresentation?.immersive);
           }
