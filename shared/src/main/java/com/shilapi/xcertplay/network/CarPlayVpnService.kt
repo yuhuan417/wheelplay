@@ -15,9 +15,7 @@ import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
-import com.shilapi.xcertplay.transport.NcmUsbBridge
 import java.io.IOException
-import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
@@ -26,10 +24,10 @@ import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Hosts the AirPlay TCP listener for both NCM/VPN and local-only Wi-Fi transports.
+ * Hosts the AirPlay TCP listener on the local-only Wi-Fi transport.
  *
- * The wired path also owns the Android VPN tunnel and NCM IPv6 bridge. VPN consent is requested
- * with [prepare] before binding.
+ * The same service also owns the optional Tesla HTTP VPN aliases, which are independent of the
+ * AirPlay listener. VPN consent for those aliases is requested with [prepare] before binding.
  */
 open class CarPlayVpnService : VpnService() {
     inner class LocalBinder : Binder() {
@@ -58,8 +56,6 @@ open class CarPlayVpnService : VpnService() {
     private val sessions = mutableSetOf<AirPlaySession>()
     @Volatile private var attachment: AirPlayAttachment? = null
     private var serverSocket: ServerSocket? = null
-    private var bridge: Ipv6NcmBridge? = null
-    private var tun: ParcelFileDescriptor? = null
     private var attachGeneration = 0
     private var teslaAddress: String? = null
     private var installedTeslaAddress: String? = null
@@ -71,7 +67,7 @@ open class CarPlayVpnService : VpnService() {
     @Volatile var teslaVpnStatus = TeslaHttpStatus(mode = TeslaHttpMode.VPN)
         private set
 
-    /** No packet reader is attached to these IPv4 TUNs. Only the NCM TUN exchanges packets. */
+    /** No packet reader is attached to these IPv4 TUNs. */
     protected open fun establishTeslaTunnel(address: String): ParcelFileDescriptor = Builder()
         .setSession("WheelPlay Tesla (experimental)")
         .allowFamily(OsConstants.AF_INET)
@@ -113,16 +109,12 @@ open class CarPlayVpnService : VpnService() {
             // Do not call prepare() from reconciliation: a pre-consented app can take VPN
             // ownership back from another app. establish() itself fails if no longer prepared.
             if (installedTeslaAddress != address) {
-                if (tun != null) {
-                    teslaVpnStatus = TeslaHttpStatus(error = "请先断开有线 CarPlay，再应用免 Root 模式或新访问 IP", mode = TeslaHttpMode.VPN)
-                    return
-                }
                 closeTeslaLocked()
                 teslaAnchor = establishTeslaTunnel(address)
                 teslaAnchorDuplicate = duplicateTeslaTunnel(teslaAnchor!!)
                 installedTeslaAddress = address
             }
-            if (tun == null && teslaPlaceholder == null) {
+            if (teslaPlaceholder == null) {
                 teslaPlaceholder = establishTeslaTunnel(TeslaHttpConfig.VPN_PLACEHOLDER_ADDRESS)
             }
             if (!isTeslaAddressPresent(address)) throw IOException("系统未保留访问 IP；此设备可能不支持免 Root 模式，请关闭或手动重试")
@@ -145,75 +137,11 @@ open class CarPlayVpnService : VpnService() {
         installedTeslaAddress = null
     }
 
-    /** Establish last; creating an IPv4 placeholder after this would deactivate the NCM link. */
-    @Synchronized
-    protected fun activateWiredTunnel(linkLocal: String): ParcelFileDescriptor {
-        val wired = establishTunnel(linkLocal)
-        tun = wired
-        teslaPlaceholder?.close()
-        teslaPlaceholder = null
-        return wired
-    }
-    /** Only the original wired CarPlay IPv6 link uses Android's VPN API. */
-    protected open fun establishTunnel(linkLocal: String): ParcelFileDescriptor = Builder()
-        .allowFamily(OsConstants.AF_INET)
-        .allowFamily(OsConstants.AF_INET6)
-        .setSession(SESSION_NAME)
-        .setMtu(TUN_MTU)
-        .setBlocking(true)
-        .addAddress(linkLocal, LINK_PREFIX)
-        .addRoute(LINK_LOCAL_ROUTE, LINK_PREFIX)
-        // DiPlay #168: reject failed scoping instead of establishing a tunnel for every UID.
-        .addAllowedApplication(packageName)
-        .establish() ?: throw IOException("CarPlay VPN 未获授权")
-
     override fun onBind(intent: Intent?): IBinder? =
         if (intent?.action == SERVICE_INTERFACE) super.onBind(intent) else binder
 
-    @Synchronized
-    fun attach(
-        ncm: NcmUsbBridge,
-        linkLocal: String,
-        hostMac: ByteArray,
-        config: AirPlayConfig,
-        identity: AirPlayIdentity,
-        pairings: PairingStore,
-        mfi: MfiAuthenticator?,
-        listener: AirPlaySessionListener,
-        media: AirPlayMediaHandler,
-    ): AttachResult {
-        releaseLocked()
-        active.set(true)
-        val generation = ++attachGeneration
-        return try {
-            val address = InetAddress.getByName(linkLocal)
-            if (address !is Inet6Address || !address.isLinkLocalAddress) {
-                throw IllegalArgumentException("linkLocal must be a link-local IPv6 literal")
-            }
-            require(hostMac.size == 6) { "hostMac must be 6 bytes" }
-
-            val tunFd = activateWiredTunnel(linkLocal)
-
-            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error ->
-                onTransportError(generation, listener, error)
-            }
-            ipv6Bridge.start()
-            bridge = ipv6Bridge
-
-            startAirPlayServer(
-                generation,
-                AirPlayAttachment(address, config, identity, pairings, mfi, listener, media),
-            )
-            AttachResult.Started
-        } catch (error: Exception) {
-            releaseLocked()
-            AttachResult.Failed(error.message ?: error.javaClass.simpleName)
-        }
-    }
-
     /**
-     * Starts the AirPlay listener on the local-only Wi-Fi AP address without establishing a VPN or
-     * NCM bridge.
+     * Starts the AirPlay listener on the local-only Wi-Fi AP address without establishing a VPN.
      */
     @Synchronized
     fun attachWireless(
@@ -243,7 +171,7 @@ open class CarPlayVpnService : VpnService() {
         }
     }
 
-    /** Releases the active AirPlay listener and whichever VPN/NCM transport resources are active. */
+    /** Releases the active AirPlay listener and its media sessions. */
     @Synchronized
     fun detach() {
         releaseLocked()
@@ -253,13 +181,10 @@ open class CarPlayVpnService : VpnService() {
 
     @Synchronized
     override fun onRevoke() {
+        // Only the Tesla HTTP aliases use the VPN API; wireless AirPlay is independent.
         teslaFailure = "VPN 授权已撤销，请在设置中重新授权并重试"
-        val listener = if (bridge != null) attachment?.listener else null
-        // Wireless AirPlay does not depend on the wired VPN.
-        if (bridge != null) releaseLocked() else closeTunnelLocked()
         closeTeslaLocked()
         teslaVpnStatus = TeslaHttpStatus(error = teslaFailure, mode = TeslaHttpMode.VPN)
-        listener?.onTransportError("CarPlay VPN permission revoked")
         super.onRevoke()
     }
 
@@ -384,23 +309,11 @@ open class CarPlayVpnService : VpnService() {
         serverSocket?.close()
         serverSocket = null
         closeSessionsLocked()
-        closeTunnelLocked()
         reconcileTeslaLocked()
-    }
-
-    private fun closeTunnelLocked() {
-        bridge?.close()
-        bridge = null
-        tun?.close()
-        tun = null
     }
 
     companion object {
         private const val TAG = "xcertplay-usb"
-        private const val LINK_PREFIX = 64
-        private const val LINK_LOCAL_ROUTE = "fe80::"
-        private const val SESSION_NAME = "xcertplay CarPlay"
-        private const val TUN_MTU = 1500
 
         /** Returns the VPN consent intent, or null when consent is already granted. */
         fun prepare(context: Context): Intent? = VpnService.prepare(context)

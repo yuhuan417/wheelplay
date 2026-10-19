@@ -71,16 +71,18 @@ class AcmeDns01ClientTest {
         }
 
         fun readJws(exchange: HttpExchange): Pair<JSONObject, ByteArray> {
-            val body = exchange.requestBody.readBytes().toString(StandardCharsets.US_ASCII)
-            val parts = body.split('.')
-            assertEquals(3, parts.size)
-            val header = JSONObject(String(Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8))
-            val payload = if (parts[1].isEmpty()) ByteArray(0) else Base64.getUrlDecoder().decode(parts[1])
+            val body = exchange.requestBody.readBytes().toString(StandardCharsets.UTF_8)
+            val jws = JSONObject(body)
+            val protected64 = jws.getString("protected")
+            val payload64 = jws.getString("payload")
+            val signature64 = jws.getString("signature")
+            val header = JSONObject(String(Base64.getUrlDecoder().decode(protected64), StandardCharsets.UTF_8))
+            val payload = if (payload64.isEmpty()) ByteArray(0) else Base64.getUrlDecoder().decode(payload64)
             val key = accountPublic.get() ?: publicFromJwk(header.getJSONObject("jwk"))
             val verifier = Signature.getInstance("SHA256withECDSA")
             verifier.initVerify(key)
-            verifier.update("${parts[0]}.${parts[1]}".toByteArray(StandardCharsets.US_ASCII))
-            assertTrue("JWS signature must verify", verifier.verify(rawToDer(Base64.getUrlDecoder().decode(parts[2]))))
+            verifier.update("$protected64.$payload64".toByteArray(StandardCharsets.US_ASCII))
+            assertTrue("JWS signature must verify", verifier.verify(rawToDer(Base64.getUrlDecoder().decode(signature64))))
             assertEquals("ES256", header.getString("alg"))
             assertEquals(base + exchange.requestURI.path, header.getString("url"))
             return header to payload

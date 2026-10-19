@@ -1,6 +1,9 @@
 package com.shilapi.xcertplay.domain
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.util.AtomicFile
 import android.util.Log
 import com.shilapi.xcertplay.DiagnosticLogSink
@@ -8,8 +11,10 @@ import com.shilapi.xcertplay.web.LanTls
 import com.shilapi.xcertplay.web.WebListenSettings
 import com.shilapi.xcertplay.web.WebSession
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.net.URL
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -53,6 +58,7 @@ internal object OwnDomainManager {
     private const val RETRY_INTERVAL_MILLIS = 60L * 60 * 1000
     private const val RECORD_REFRESH_MILLIS = 6L * 60 * 60 * 1000
     private const val DEBOUNCE_MILLIS = 30_000L
+    private const val INTERNET_WAIT_MILLIS = 20_000L
 
     private val scheduler = Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task, "wheelplay-own-domain").apply { isDaemon = true }
@@ -112,7 +118,38 @@ internal object OwnDomainManager {
             val address = config.addressOverride.ifBlank { localHotspotAddress() }
                 ?: throw OwnDomainException("找不到安卓热点/信号桥的 IPv4 地址，请在“解析地址”里手动填写")
             status = Status("检查中", "正在检查 DuckDNS 解析与证书", config.domain, address)
-            updateRecord(context, config, address)
+            val networks = awaitInternetNetworks(context)
+            if (networks.isEmpty()) {
+                throw OwnDomainException(
+                    "没有可用的互联网网络；请先连接 Wi-Fi 或移动数据后再更新 DuckDNS",
+                )
+            }
+            var selected: InternetNetwork? = null
+            var duckFailure: Throwable? = null
+            for (network in networks) {
+                try {
+                    updateRecord(context, config, address) { url ->
+                        network.network.openConnection(URL(url)) as HttpURLConnection
+                    }
+                    selected = network
+                    break
+                } catch (error: Throwable) {
+                    duckFailure = error
+                    log(
+                        "DuckDNS update failed via iface=${network.interfaceName}: " +
+                            (error.message ?: error.javaClass.simpleName).take(240),
+                    )
+                }
+            }
+            val network = selected
+                ?: throw (duckFailure ?: OwnDomainException("DuckDNS 解析更新失败"))
+            log(
+                "using network iface=${network.interfaceName} " +
+                    "validated=${network.validated}",
+            )
+            val openConnection: (String) -> HttpURLConnection = { url ->
+                network.network.openConnection(URL(url)) as HttpURLConnection
+            }
 
             val stored = readStored(context)
             val valid = stored != null && stored.cert.notAfter.time - now > RENEW_BEFORE_MILLIS &&
@@ -130,7 +167,7 @@ internal object OwnDomainManager {
 
             status = Status("申请中", "正在通过 DuckDNS 申请 Let's Encrypt 证书", config.domain, address)
             log("issuing certificate for ${config.domain} at $address")
-            val issued = AcmeDns01Client(log = ::log).issue(
+            val issued = AcmeDns01Client(log = ::log, openConnection = openConnection).issue(
                 domain = config.domain,
                 accountKey = loadOrCreateAccountKey(context),
                 email = config.email,
@@ -152,7 +189,14 @@ internal object OwnDomainManager {
             nextCheckAt = System.currentTimeMillis() + CHECK_INTERVAL_MILLIS
             log("certificate issued; valid until ${date(next.cert.notAfter)}")
         } catch (error: Throwable) {
-            val message = (error.message ?: error.javaClass.simpleName).take(300)
+            val message = buildString {
+                append(error.message ?: error.javaClass.simpleName)
+                if (error is AcmeDns01Client.AcmeException) {
+                    error.problem?.takeIf { it.isNotBlank() }?.let {
+                        if (!contains(it)) append(": ").append(it)
+                    }
+                }
+            }.take(500)
             log("own domain failed: $message")
             status = Status(
                 phase = "失败",
@@ -182,14 +226,81 @@ internal object OwnDomainManager {
         )
     }
 
-    private fun updateRecord(context: Context, config: OwnDomainConfig, address: String) {
+    private fun updateRecord(
+        context: Context,
+        config: OwnDomainConfig,
+        address: String,
+        openConnection: (String) -> HttpURLConnection,
+    ) {
         val now = System.currentTimeMillis()
         val last = OwnDomainSettings.lastRecordAddress(context)
         if (last == address && now - OwnDomainSettings.lastRecordAt(context) < RECORD_REFRESH_MILLIS) return
-        val result = DuckDnsApi.update(DuckDnsApi.addressUrl(config.subdomain, config.token, address))
+        val result = try {
+            DuckDnsApi.update(DuckDnsApi.addressUrl(config.subdomain, config.token, address), openConnection)
+        } catch (error: Throwable) {
+            throw OwnDomainException(
+                "无法通过 HTTPS 连接 DuckDNS（${error.message ?: error.javaClass.simpleName}）",
+            )
+        }
         if (!result.ok) throw OwnDomainException("DuckDNS 更新解析失败：${result.response.take(160)}")
         OwnDomainSettings.saveRecord(context, address)
         log("A record ${config.domain} -> $address")
+    }
+
+    private data class InternetNetwork(
+        val network: Network,
+        val interfaceName: String,
+        val validated: Boolean,
+    )
+
+    /** Bind DuckDNS/ACME traffic to a network that actually has internet access. */
+    private fun awaitInternetNetworks(context: Context): List<InternetNetwork> {
+        val deadline = System.currentTimeMillis() + INTERNET_WAIT_MILLIS
+        var lastLog = 0L
+        while (true) {
+            internetNetworks(context).takeIf { it.isNotEmpty() }?.let { return it }
+            if (System.currentTimeMillis() >= deadline) return emptyList()
+            val now = System.currentTimeMillis()
+            if (now - lastLog >= 5_000L) {
+                lastLog = now
+                log("waiting for an internet-capable network")
+            }
+            try {
+                Thread.sleep(250L)
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return emptyList()
+            }
+        }
+    }
+
+    /**
+     * Returns internet-capable, non-VPN networks ordered from best to worst. The process default
+     * may be the local AP, the Tesla alias, or a stale VPN during bring-up; binding each request
+     * avoids sending DuckDNS/ACME traffic out of an interface without upstream connectivity.
+     */
+    private fun internetNetworks(context: Context): List<InternetNetwork> {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java) ?: return emptyList()
+        return connectivity.allNetworks.mapNotNull { network ->
+            val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+            if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                return@mapNotNull null
+            }
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) ||
+                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            ) {
+                return@mapNotNull null
+            }
+            val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            val score = (if (validated) 4 else 0) +
+                (if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) 2 else 0) +
+                (if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) 1 else 0)
+            InternetNetwork(
+                network = network,
+                interfaceName = connectivity.getLinkProperties(network)?.interfaceName ?: "unknown",
+                validated = validated,
+            ) to score
+        }.sortedByDescending { it.second }.map { it.first }
     }
 
     private fun install(context: Context, stored: Stored) {

@@ -40,6 +40,9 @@ internal class AcmeDns01Client(
     private val dnsWaitMillis: Long = DEFAULT_DNS_WAIT_MILLIS,
     private val pollIntervalMillis: Long = DEFAULT_POLL_INTERVAL_MILLIS,
     private val pollTimeoutMillis: Long = DEFAULT_POLL_TIMEOUT_MILLIS,
+    private val openConnection: (String) -> HttpURLConnection = {
+        URL(it).openConnection() as HttpURLConnection
+    },
 ) {
     data class Issued(val chainPem: ByteArray, val keyPem: ByteArray)
 
@@ -114,11 +117,26 @@ internal class AcmeDns01Client(
     }
 
     private fun registerAccount(email: String) {
+        val newAccountUrl = directory.getString("newAccount")
         val payload = JSONObject().put("termsOfServiceAgreed", true)
         if (email.isNotBlank()) {
             payload.put("contact", org.json.JSONArray().put("mailto:$email"))
         }
-        val response = postJws(directory.getString("newAccount"), payload.toString(), useJwk = true)
+        val response = try {
+            postJws(newAccountUrl, payload.toString(), useJwk = true)
+        } catch (error: AcmeException) {
+            // A syntactically valid but undeliverable address is rejected as invalidContact.
+            // The address is optional, so retry once without it instead of blocking issuance.
+            val rejectedContact = error.problem?.contains("invalidContact", ignoreCase = true) == true ||
+                error.problem?.contains("invalidEmail", ignoreCase = true) == true
+            if (!rejectedContact || email.isBlank()) throw error
+            log("ACME rejected the contact email; retrying without a contact")
+            postJws(
+                newAccountUrl,
+                JSONObject().put("termsOfServiceAgreed", true).toString(),
+                useJwk = true,
+            )
+        }
         accountUrl = response.location ?: throw AcmeException("ACME newAccount returned no account URL")
         log("ACME account ready")
     }
@@ -222,7 +240,7 @@ internal class AcmeDns01Client(
     private fun postJwsAsGet(url: String): HttpResponse = postJws(url, null, useJwk = false)
 
     private fun postJws(url: String, payload: String?, useJwk: Boolean): HttpResponse {
-        repeat(2) { attempt ->
+        repeat(3) { attempt ->
             ensureNonce()
             val protected = JSONObject()
                 .put("alg", "ES256")
@@ -233,20 +251,34 @@ internal class AcmeDns01Client(
             val protected64 = b64(protected.toString().toByteArray(StandardCharsets.UTF_8))
             val payload64 = if (payload == null) "" else b64(payload.toByteArray(StandardCharsets.UTF_8))
             val signature = sign("$protected64.$payload64")
+            // ACME requires the flattened JSON serialization, not the compact
+            // "protected.payload.signature" form. Let's Encrypt answers the compact form with
+            // "Unable to validate JWS ... Parse error reading JWS".
+            val jws = JSONObject()
+                .put("protected", protected64)
+                .put("payload", payload64)
+                .put("signature", signature)
+                .toString()
+                .toByteArray(StandardCharsets.UTF_8)
             val response = request(
                 url,
                 "POST",
-                "$protected64.$payload64.$signature".toByteArray(StandardCharsets.US_ASCII),
+                jws,
                 mapOf("Content-Type" to "application/jose+json", "Accept" to "application/json, application/problem+json"),
             )
             nonce = response.nonce
             if (response.code in 200..299) return response
             val problem = problemType(response)
-            if (attempt == 0 && problem == "urn:ietf:params:acme:error:badNonce") {
+            if (attempt < 2 && problem == "urn:ietf:params:acme:error:badNonce") {
                 nonce = null
                 return@repeat
             }
-            throw AcmeException("ACME request failed (HTTP ${response.code})", problemDetail(response))
+            val detail = problemDetail(response)
+            log("ACME HTTP ${response.code} at $url: $detail")
+            throw AcmeException(
+                "ACME request failed (HTTP ${response.code}) at $url: $detail",
+                detail,
+            )
         }
         throw AcmeException("ACME request failed after a nonce retry")
     }
@@ -263,11 +295,13 @@ internal class AcmeDns01Client(
     }
 
     private fun request(url: String, method: String, body: ByteArray?, headers: Map<String, String>): HttpResponse {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+        val connection = openConnection(url).apply {
             requestMethod = method
             connectTimeout = 20_000
             readTimeout = 60_000
             instanceFollowRedirects = true
+            useCaches = false
+            setRequestProperty("Cache-Control", "no-cache")
             setRequestProperty("User-Agent", "WheelPlay/1.0")
             headers.forEach { (name, value) -> setRequestProperty(name, value) }
         }

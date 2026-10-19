@@ -10,9 +10,9 @@ class DiagnosticLogSinkTest {
     @Test fun deliversToTheAttachedWriter() {
         val seen = mutableListOf<String>()
         DiagnosticLogSink.attach { seen += it }
-        DiagnosticLogSink.append("WebRTC fallback to JPEG: native connection failed (grace=10000ms)")
+        DiagnosticLogSink.append("WebCodecs failed: decoder unavailable")
         assertEquals(
-            listOf("WebRTC fallback to JPEG: native connection failed (grace=10000ms)"),
+            listOf("WebCodecs failed: decoder unavailable"),
             seen,
         )
     }

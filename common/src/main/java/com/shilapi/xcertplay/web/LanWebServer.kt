@@ -251,13 +251,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                 }
             },
         )
-        private val rtcLock = Any()
-        private var rtcSource: WebVideoSource? = null
-        private var rtcConfig: WebVideoSource.Config? = null
-        private var rtc: RtcVideoStream? = null
-        private var rtcAttempted = false
-        private var rtcId = 0L
-        private var rtcAnswered = false
+        private val videoLock = Any()
         private var webCodecsSource: WebVideoSource? = null
         private var webCodecsConfig: WebVideoSource.WebCodecsConfig? = null
         private var webCodecs: WebCodecsViewer? = null
@@ -266,50 +260,14 @@ internal class LanWebServer(private val context: Context, private val code: Stri
         private var webCodecsError: String? = null
         private val loggedOnce = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-        private fun reconcileVideo() = synchronized(rtcLock) {
+        private fun reconcileVideo() = synchronized(videoLock) {
             val source = WebSession.videoSource
-            if (rtcSource !== source || rtcConfig !== source?.config) {
-                stopRtc()
-                rtcSource = source; rtcConfig = source?.config; rtcAttempted = false
-            }
             val nextConfig = source?.webCodecsConfig
             if (webCodecsSource !== source || webCodecsConfig !== nextConfig) {
                 stopWebCodecs()
                 webCodecsSource = source; webCodecsConfig = nextConfig; webCodecsAttempted = false
                 webCodecsError = null
             }
-        }
-
-        private fun stopRtc() = synchronized(rtcLock) {
-            val old = rtc
-            rtc = null
-            if (old != null) {
-                rtcSource?.detach(old); old.close()
-                reply(WebStreamSender.Control.RTC, JSONObject().put("type", "rtc-stop").put("id", rtcId).toString())
-            }
-            sender.frameAvailable()
-            WebSession.notifyJpegDemand()
-        }
-
-        private fun startRtc() = synchronized(rtcLock) {
-            reconcileVideo()
-            if (rtcAttempted || ended.get() || !WebSession.videoActive) return
-            val source = rtcSource ?: return
-            val config = rtcConfig ?: return
-            rtcAttempted = true; rtcAnswered = false
-            val id = ++rtcId
-            val recovery = com.shilapi.xcertplay.AirPlayPersistence.loadRtcRecoveryPolicy(context)
-            val stream = RtcVideoStream(source, config, recovery, offer = { sdp ->
-                synchronized(rtcLock) {
-                    if (!ended.get() && rtc != null && rtcId == id) reply(WebStreamSender.Control.RTC,
-                        JSONObject().put("type", "rtc-offer").put("id", id).put("codec", config.codec.name)
-                            .put("recoveryGraceMs", recovery.graceMs).put("sdp", sdp).toString())
-                }
-            }, failure = { synchronized(rtcLock) { if (rtcId == id) stopRtc() } },
-                log = { com.shilapi.xcertplay.DiagnosticLogSink.append(it) })
-            rtc = stream
-            if (!source.attach(stream, config)) { stopRtc(); return }
-            stream.start()
         }
 
         private inner class WebCodecsViewer(
@@ -325,7 +283,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
             }
         }
 
-        private fun startWebCodecs() = synchronized(rtcLock) {
+        private fun startWebCodecs() = synchronized(videoLock) {
             reconcileVideo()
             if (webCodecsAttempted || ended.get() || closing.get() || !WebSession.videoActive) return
             // WebCodecs is only exposed in a secure context, so the plain-HTTP listener cannot use it.
@@ -350,7 +308,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
             )
         }
 
-        private fun stopWebCodecs(notifyBrowser: Boolean = true) = synchronized(rtcLock) {
+        private fun stopWebCodecs(notifyBrowser: Boolean = true) = synchronized(videoLock) {
             val old = webCodecs
             webCodecs = null
             webCodecsActive = false
@@ -369,7 +327,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
          * Keeps a WebCodecs failure in the diagnostic report and leaves the viewer stopped.
          * No JPEG fallback: the selected transport must fail visibly so the cause can be fixed.
          */
-        private fun failWebCodecs(reason: String, detail: String? = null) = synchronized(rtcLock) {
+        private fun failWebCodecs(reason: String, detail: String? = null) = synchronized(videoLock) {
             val viewer = webCodecs
             webCodecs = null
             webCodecsActive = false
@@ -390,7 +348,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                 if (!detail.isNullOrBlank()) append("; detail=").append(detail.take(6000))
             }
             com.shilapi.xcertplay.DiagnosticLogSink.append(report)
-            android.util.Log.w("WheelPlayRtc", report)
+            android.util.Log.w("WheelPlayVideo", report)
             if (!ended.get() && !closing.get()) {
                 reply(WebStreamSender.Control.WEBCODECS,
                     JSONObject().put("type", "webcodecs-error").put("reason", reason).toString())
@@ -473,7 +431,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                 val textType = data.optString("type")
                 // WebCodecs failures carry the browser's diagnostics, not just a one-line reason.
                 val textLimit = when (textType) {
-                    "rtc-answer", "webcodecs-fallback", "webcodecs-unsupported" -> 16_384
+                    "webcodecs-fallback", "webcodecs-unsupported" -> 16_384
                     else -> 2_048
                 }
                 require(message.binaryPayload.size <= textLimit)
@@ -517,13 +475,10 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                                 }
                             }
                         }
-                        synchronized(rtcLock) { reply(WebStreamSender.Control.STATUS,
+                        synchronized(videoLock) { reply(WebStreamSender.Control.STATUS,
                             JSONObject().put("type", "status").put("width", WebSession.width)
                             .put("height", WebSession.height).put("stage", WebSession.stage)
-                            .put("streaming", WebSession.videoActive && (frame != null || rtc?.connected == true ||
-                                rtc?.holdingFrame == true || webCodecsActive))
-                            .put("rtcAvailable", rtcConfig != null && !rtcAttempted && WebSession.videoActive)
-                            .put("rtcFrames", rtc?.sentFrames ?: 0)
+                            .put("streaming", WebSession.videoActive && (frame != null || webCodecsActive))
                             .put("webCodecsAvailable", webCodecsConfig != null && !webCodecsAttempted &&
                                 WebSession.videoActive && this@LanWebServer.secure)
                             .put("webCodecsNeedsHttps", webCodecsConfig != null && WebSession.videoActive &&
@@ -531,53 +486,20 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                             .put("webCodecsActive", webCodecsActive)
                             .put("webCodecsFrames", webCodecs?.frames ?: 0)
                             .put("webCodecsError", webCodecsError)
-                            .put("performance", JSONObject().put("source", rtcSource?.performanceSnapshot()?.let(::JSONObject))
-                                .put("transport", rtc?.snapshot()?.let(::JSONObject)))
+                            .put("performance", JSONObject().put("source",
+                                WebSession.videoSource?.performanceSnapshot()?.let(::JSONObject)))
                             .put("transport", when {
                                 webCodecsError != null -> "webcodecs-failed"
                                 webCodecsActive -> "webcodecs"
-                                rtcSource?.jpegNeeded == false -> "webrtc"
                                 else -> "jpeg"
                             })
-                            .put("fallback", rtcSource?.technology == StreamTechnology.WEBRTC && (rtcAttempted && rtc == null || rtcConfig == null))
                             .toString()) }
                     }
-                    "rtc-start" -> startRtc()
-                    "rtc-answer" -> synchronized(rtcLock) {
-                        if (data.getLong("id") == rtcId && rtc != null && !rtcAnswered) {
-                            rtcAnswered = true
-                            rtc?.answer(data.getString("sdp"))
-                        }
-                    }
-                    "rtc-feedback" -> synchronized(rtcLock) {
-                        if (data.getLong("id") == rtcId && rtc != null) {
-                            fun counter(name: String): Long = data.getLong(name).also { require(it in 0..9_007_199_254_740_991L) }
-                            val rtt = if (data.isNull("rttMs")) null else data.getDouble("rttMs").also { require(it.isFinite() && it in 0.0..60_000.0) }
-                            rtc?.feedback(RtcReceiverHealth.Report(counter("packets"), counter("lost"), counter("decoded"), counter("nack"), rtt))
-                        }
-                    }
-                    "rtc-ready" -> synchronized(rtcLock) {
-                        if (data.getLong("id") == rtcId) {
-                            com.shilapi.xcertplay.DiagnosticLogSink.append("WebRTC video displayed by the browser")
-                            rtc?.displayed(); sender.acknowledge()
-                        }
-                    }
-                    "rtc-fallback" -> synchronized(rtcLock) {
-                        // The browser decides this one on its own, so it is the only record of why
-                        // no WebRTC path could be used. Report it instead of stopping silently.
-                        if (data.getLong("id") == rtcId) {
-                            com.shilapi.xcertplay.DiagnosticLogSink.append(
-                                "WebRTC declined by the browser (codec unsupported, no UDP path, " +
-                                    "rejected SDP, or decode failure); using JPEG",
-                            )
-                            stopRtc()
-                        }
-                    }
                     "webcodecs-start" -> startWebCodecs()
-                    "webcodecs-keyframe" -> synchronized(rtcLock) {
+                    "webcodecs-keyframe" -> synchronized(videoLock) {
                         if (webCodecs != null) webCodecsSource?.requestKeyframe(force = true)
                     }
-                    "webcodecs-ready" -> synchronized(rtcLock) {
+                    "webcodecs-ready" -> synchronized(videoLock) {
                         val viewer = webCodecs ?: return@synchronized
                         webCodecsActive = true
                         webCodecsSource?.displayed(viewer)
@@ -624,7 +546,6 @@ internal class LanWebServer(private val context: Context, private val code: Stri
 
         private fun cleanup() {
             if (!ended.compareAndSet(false, true)) return
-            stopRtc()
             stopWebCodecs(notifyBrowser = false)
             synchronized(this@LanWebServer) {
                 if (viewer === this) { WebSession.audio.detach(this); viewer = null }

@@ -22,29 +22,28 @@ export function createControlOutbox(socket, {
 } = {}) {
   const touches = [];
   const signals = [];
-  let ack = null, audioAck = null, audioReady = null, ping = null, feedback = null, viewport = null, timer = null, blockedSince = null, closed = false;
+  let ack = null, audioAck = null, audioReady = null, ping = null, viewport = null, timer = null, blockedSince = null, closed = false;
   const close = () => {
     closed = true; cancel(timer); timer = null;
-    ack = null; audioAck = null; audioReady = null; ping = null; feedback = null; viewport = null; touches.length = 0; signals.length = 0;
+    ack = null; audioAck = null; audioReady = null; ping = null; viewport = null; touches.length = 0; signals.length = 0;
   };
   const fail = () => { close(); onFailure(); };
   const flush = () => {
     if (closed) return;
     if (socket.readyState !== 1) { close(); return; }
     try {
-      while ((ack || audioAck || audioReady || touches.length || signals.length || viewport || feedback || ping) && socket.bufferedAmount < 8192) {
+      while ((ack || audioAck || audioReady || touches.length || signals.length || viewport || ping) && socket.bufferedAmount < 8192) {
         if (ack) { socket.send(ack); ack = null; }
         else if (audioAck) { socket.send(audioAck); audioAck = null; }
         else if (audioReady) { socket.send(audioReady); audioReady = null; }
         else if (touches.length) { socket.send(touches[0].json); touches.shift(); }
         else if (signals.length) { socket.send(signals[0]); signals.shift(); }
         else if (viewport) { socket.send(viewport); viewport = null; }
-        else if (feedback) { socket.send(feedback); feedback = null; }
         else { socket.send(ping); ping = null; }
         blockedSince = null;
       }
     } catch (_) { fail(); return; }
-    if (ack || audioAck || audioReady || touches.length || signals.length || viewport || feedback || ping) {
+    if (ack || audioAck || audioReady || touches.length || signals.length || viewport || ping) {
       if (blockedSince === null) blockedSince = now();
       if (now() - blockedSince >= 1500) { fail(); return; }
       if (timer === null) timer = schedule(() => { timer = null; flush(); }, 10);
@@ -62,7 +61,6 @@ export function createControlOutbox(socket, {
         const json = JSON.stringify(data);
         if (data.type === 'audio-ack') audioAck = json;
         else if (data.type === 'audio-ready') audioReady = json;
-        else if (data.type === 'rtc-feedback') feedback = json;
         else if (data.type === 'viewport') viewport = json;
         else if (data.type === 'touch') {
           const tail = touches[touches.length - 1];
@@ -70,9 +68,8 @@ export function createControlOutbox(socket, {
           if (kind === 'move' && tail && tail.kind === 'move') tail.json = json;
           else if (touches.length < 64) touches.push({ kind, json });
           else { fail(); return false; }
-        } else if (['rtc-start', 'rtc-answer', 'rtc-ready', 'rtc-fallback', 'webcodecs-start',
-          'webcodecs-ready', 'webcodecs-keyframe', 'webcodecs-fallback', 'webcodecs-unsupported',
-          'phone-connect'].includes(data.type)) {
+        } else if (['webcodecs-start', 'webcodecs-ready', 'webcodecs-keyframe',
+          'webcodecs-fallback', 'webcodecs-unsupported', 'phone-connect'].includes(data.type)) {
           if (signals.length >= 8 || json.length > 32768) { fail(); return false; }
           signals.push(json);
         } else return false;
@@ -84,254 +81,9 @@ export function createControlOutbox(socket, {
   };
 }
 
-// Keep the decoder in the DOM, outside the viewport. display:none/hidden can
-// suppress video frame callbacks on embedded browsers. drawImage copies decoded
-// frames directly; it does not read pixels back through getImageData.
-export function createVideoCanvasRenderer(video, canvas, {
-  onFrame = () => {}, onError = () => {},
-  requestFrame = callback => requestAnimationFrame(callback), cancelFrame = id => cancelAnimationFrame(id),
-  now = () => performance.now(),
-} = {}) {
-  let context = null, running = false, ownsCanvas = false, generation = 0, videoCallback = null, animationCallback = null;
-  let lastVideoCallbackAt = 0, lastFrameKey = null;
-  function prepare() {
-    video.classList.toggle('offscreen-video', true);
-    video.hidden = false;
-  }
-  function stop() {
-    const resetCanvas = ownsCanvas;
-    running = false; ownsCanvas = false; generation++;
-    if (videoCallback !== null && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(videoCallback);
-    if (animationCallback !== null) cancelFrame(animationCallback);
-    videoCallback = animationCallback = null; context = null; lastFrameKey = null;
-    video.hidden = true; video.classList.toggle('offscreen-video', false);
-    if (resetCanvas) { canvas.hidden = true; canvas.width = canvas.height = 0; }
-  }
-  function fail(error) { stop(); onError(error); }
-  function draw(metadata = null, stalled = false) {
-    if (!running || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
-    try {
-      const width = video.videoWidth, height = video.videoHeight;
-      const resized = canvas.width !== width || canvas.height !== height;
-      // Prefer the frame counter over currentTime, which can advance between
-      // decoded frames. Some WebRTC implementations leave this counter at zero.
-      const frames = video.getVideoPlaybackQuality?.().totalVideoFrames;
-      const time = metadata?.mediaTime ?? video.currentTime;
-      const key = !stalled && frames > 0 ? `frame:${frames}` : Number.isFinite(time) ? `time:${time}` : null;
-      if (!resized && key !== null && key === lastFrameKey) return;
-      if (resized) { canvas.width = width; canvas.height = height; }
-      context.drawImage(video, 0, 0, width, height);
-      lastFrameKey = key;
-      const first = canvas.hidden;
-      canvas.hidden = false;
-      if (first || resized) onFrame(width, height);
-    } catch (error) { fail(error); }
-  }
-  function start() {
-    stop(); prepare(); ownsCanvas = true;
-    try {
-      context = canvas.getContext('2d', { alpha: false });
-      if (!context) throw new Error('Canvas 2D unavailable');
-      running = true; lastVideoCallbackAt = now();
-      const token = generation, current = () => running && token === generation;
-      const observe = (_, metadata) => {
-        if (!current()) return;
-        videoCallback = null; lastVideoCallbackAt = now(); draw(metadata);
-        if (current()) videoCallback = video.requestVideoFrameCallback(observe);
-      };
-      const refresh = () => {
-        if (!current()) return;
-        animationCallback = null;
-        // Also recover if offscreen playback decodes but stops being composited.
-        if (!video.requestVideoFrameCallback) draw();
-        else if (now() - lastVideoCallbackAt >= 250) draw(null, true);
-        if (current()) animationCallback = requestFrame(refresh);
-      };
-      draw();
-      if (!current()) return;
-      if (video.requestVideoFrameCallback) videoCallback = video.requestVideoFrameCallback(observe);
-      animationCallback = requestFrame(refresh);
-    } catch (error) { fail(error); }
-  }
-  return { prepare, start, stop };
-}
-
-// Video WebRTC remains receive-only. Browser audio uses the paired WebSocket.
-export function createRtcReceiver(video, {
-  send, onReady = () => {}, onStop = () => {}, onStats = () => {},
-  onTrack = () => {}, onReset = () => {},
-  createPeer = () => new RTCPeerConnection({ iceServers: [] }),
-  supportsCodec = codec => {
-    if (typeof RTCRtpReceiver === 'undefined' || !RTCRtpReceiver.getCapabilities) return true;
-    const caps = RTCRtpReceiver.getCapabilities('video');
-    return !caps || caps.codecs.some(c => c.mimeType.toLowerCase() === `video/${codec.toLowerCase()}`);
-  },
-  schedule = setTimeout, cancel = clearTimeout, now = () => Date.now(),
-} = {}) {
-  let frameCallback = null, presented = 0, previousStats = null;
-  let codec = 'H264';
-  let peer = null, id = null, generation = 0, timeout = null, statsTimer = null, ready = false;
-  let lastDecoded = 0, sent = 0, lastSentAt = 0, sentAtLastProgress = 0;
-  let stalledSince = null, statsFailedSince = null, disconnectTimer = null, recoveryGraceMs = 10000;
-  function close() {
-    generation++; cancel(timeout); cancel(statsTimer); cancel(disconnectTimer);
-    timeout = null; statsTimer = null; disconnectTimer = null;
-    stalledSince = null; statsFailedSince = null;
-    const old = peer; peer = null; ready = false; id = null;
-    if (frameCallback !== null && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(frameCallback);
-    frameCallback = null; presented = 0; previousStats = null;
-    video.onloadeddata = null; video.onerror = null;
-    if (old) { old.ontrack = null; old.onconnectionstatechange = null; old.close(); }
-    video.srcObject = null; video.hidden = true;
-    onReset();
-  }
-  function fallback() {
-    const current = id;
-    close(); onStop();
-    if (current !== null) send({ type: 'rtc-fallback', id: current });
-  }
-  async function receive(message) {
-    if (message.type === 'rtc-stop') {
-      if (message.id === id) { close(); onStop(); }
-      return;
-    }
-    if (message.type !== 'rtc-offer') return;
-    close(); id = message.id; codec = message.codec === 'H265' ? 'H265' : 'H264';
-    recoveryGraceMs = [4000, 10000, 30000].includes(message.recoveryGraceMs) ? message.recoveryGraceMs : 10000;
-    const token = generation, current = () => generation === token && peer !== null;
-    timeout = schedule(() => { if (generation === token) fallback(); }, Math.max(10000, recoveryGraceMs));
-    try {
-      if (!supportsCodec(codec)) { fallback(); return; }
-      const pc = createPeer(); peer = pc;
-      const displayed = () => {
-        if (!current() || ready || !video.videoWidth || video.readyState < 2) return;
-        ready = true; cancel(timeout); timeout = null;
-        lastDecoded = 0; sent = 0; sentAtLastProgress = 0; lastSentAt = now();
-        send({ type: 'rtc-ready', id }); onReady();
-        if (current()) statsTimer = schedule(sample, 1000);
-      };
-      const sample = async () => {
-        if (!current()) return;
-        try {
-          const report = await pc.getStats();
-          if (!current()) return;
-          statsFailedSince = null;
-          report.forEach(stat => {
-            if (stat.type !== 'inbound-rtp' || (stat.kind || stat.mediaType) !== 'video') return;
-            const decoded = stat.framesDecoded || 0, at = now();
-            if (decoded !== lastDecoded || sent <= sentAtLastProgress || at - lastSentAt >= 2000) {
-              stalledSince = null; sentAtLastProgress = sent;
-            } else if (stalledSince === null) stalledSince = at;
-            const previous = previousStats;
-            const elapsed = previous ? Math.max(1, at - previous.at) : 0;
-            const delta = key => previous && Number.isFinite(stat[key]) && Number.isFinite(previous.stat[key])
-              ? Math.max(0, stat[key] - previous.stat[key]) : null;
-            const rate = key => elapsed && delta(key) !== null ? delta(key) * 1000 / elapsed : null;
-            const averageMs = (total, count) => delta(count) > 0 && delta(total) !== null ? delta(total) * 1000 / delta(count) : null;
-            let rttMs = null;
-            report.forEach(entry => {
-              if (entry.type === 'candidate-pair' && entry.state === 'succeeded' && entry.nominated && Number.isFinite(entry.currentRoundTripTime)) rttMs = entry.currentRoundTripTime * 1000;
-            });
-            const metrics = {
-              receivedFps: rate('framesReceived'), decodedFps: rate('framesDecoded'),
-              presentedFps: video.requestVideoFrameCallback && elapsed ? Math.max(0, presented - previous.presented) * 1000 / elapsed : null,
-              decodeMs: averageMs('totalDecodeTime', 'framesDecoded'),
-              jitterBufferMs: averageMs('jitterBufferDelay', 'jitterBufferEmittedCount'),
-              processingMs: averageMs('totalProcessingDelay', 'framesDecoded'),
-              dropped: delta('framesDropped'), lost: delta('packetsLost'), nack: delta('nackCount'),
-              bitrateMbps: rate('bytesReceived') === null ? null : rate('bytesReceived') * 8 / 1e6,
-              rttMs,
-            };
-            onStats(metrics.presentedFps ?? metrics.decodedFps, metrics);
-            send({ type: 'rtc-feedback', id, packets: Math.max(0, stat.packetsReceived || 0),
-              lost: Math.max(0, stat.packetsLost || 0), decoded, nack: Math.max(0, stat.nackCount || 0), rttMs });
-            previousStats = { at, stat, presented };
-            lastDecoded = decoded;
-            // Static CarPlay screens legitimately stop producing frames.
-            if (stalledSince !== null && at - stalledSince >= recoveryGraceMs) fallback();
-          });
-        } catch (_) {
-          if (current()) {
-            if (statsFailedSince === null) statsFailedSince = now();
-            if (now() - statsFailedSince >= recoveryGraceMs) fallback();
-          }
-        }
-        if (current()) statsTimer = schedule(sample, 1000);
-      };
-      pc.onconnectionstatechange = () => {
-        if (!current()) return;
-        if (['failed', 'closed'].includes(pc.connectionState)) { fallback(); return; }
-        if (pc.connectionState === 'disconnected') {
-          if (disconnectTimer === null) {
-            const timer = schedule(() => {
-              if (current() && disconnectTimer === timer && pc.connectionState !== 'connected') fallback();
-            }, recoveryGraceMs);
-            disconnectTimer = timer;
-          }
-        } else if (pc.connectionState === 'connected') {
-          cancel(disconnectTimer); disconnectTimer = null;
-        }
-      };
-      pc.ontrack = event => {
-        if (!current()) return;
-        const receiver = event.receiver || (typeof pc.getReceivers === 'function'
-          ? pc.getReceivers().find(r => r && r.track === event.track)
-          : null);
-        if (receiver) {
-          try { receiver.playoutDelayHint = 0; } catch (_) {}
-          try { receiver.jitterBufferTarget = 0; } catch (_) {}
-        }
-        video.onloadeddata = displayed;
-        video.onerror = () => { if (current()) fallback(); };
-        if (video.requestVideoFrameCallback && frameCallback === null) {
-          let firstPresented = null;
-          const observe = (_, metadata) => {
-            if (!current()) return;
-            if (firstPresented === null) firstPresented = metadata.presentedFrames;
-            presented = metadata.presentedFrames - firstPresented;
-            frameCallback = video.requestVideoFrameCallback(observe);
-          };
-          frameCallback = video.requestVideoFrameCallback(observe);
-        }
-        video.srcObject = event.streams[0] || new MediaStream([event.track]);
-        onTrack();
-        if (!current()) return;
-        video.play().then(displayed).catch(() => { if (current()) fallback(); });
-      };
-      await pc.setRemoteDescription({ type: 'offer', sdp: message.sdp });
-      if (!current()) return;
-      const answer = await pc.createAnswer();
-      if (!current()) return;
-      if (/^m=video 0(?: |\r?$)/m.test(answer.sdp)) { fallback(); return; }
-      // Use the browser as DTLS server: Mbed TLS 3.6 cannot reassemble a fragmented
-      // ClientHello from newer Chrome versions. Passive is a standard answer role.
-      await pc.setLocalDescription({ type: answer.type, sdp: answer.sdp.replace(/a=setup:active/g, 'a=setup:passive') });
-      if (!current()) return;
-      const answerReady = () => {
-        if (!current() || pc.iceGatheringState !== 'complete') return;
-        pc.onicegatheringstatechange = null;
-        send({ type: 'rtc-answer', id, sdp: pc.localDescription.sdp });
-      };
-      if (pc.iceGatheringState === 'complete') answerReady();
-      else pc.onicegatheringstatechange = answerReady;
-    } catch (_) { if (generation === token) fallback(); }
-  }
-  return { receive, close, fallback, get active() { return ready; }, get codec() { return codec; },
-    get recovering() { return ready && (disconnectTimer !== null || stalledSince !== null || statsFailedSince !== null); },
-    progress(count) {
-      if (count > sent) {
-        if (now() - lastSentAt >= 2000) stalledSince = null;
-        lastSentAt = now();
-      }
-      sent = count;
-    },
-  };
-}
-
-// Third transport: the phone forwards CarPlay's H.264/H.265 NAL units over the control
-// WebSocket and the browser decodes them with WebCodecs. This is not WebRTC: there is no
-// SDP/ICE/DTLS/SRTP, and the payload rides the same TCP socket as JPEG and audio. WebCodecs
-// is only exposed in a secure context, so this path requires the HTTPS page.
+// The phone forwards CarPlay's H.264/H.265 NAL units over the control WebSocket and the
+// browser decodes them with WebCodecs. The payload rides the same TCP socket as JPEG and
+// audio. WebCodecs is only exposed in a secure context, so this path requires HTTPS.
 export const WEBCODECS_VIDEO_MAGIC = 0x31435657; // "WVC1"
 
 /** Converts Annex B NAL units to the 4-byte length framing WebCodecs uses with avcC/hvcC. */
@@ -637,20 +389,18 @@ if (typeof document !== 'undefined') {
   // as a flicker at frame rate on car hardware. `screen` always names the visible buffer.
   let screen = $('screen');
   let spare = $('screen-next');
-  const video = $('video');
   const canvas = $('video-canvas');
   const wcCanvas = $('wc-canvas');
   const display = $('display');
   const touchSurface = $('touch-surface');
   // Read-only diagnostic snapshots; counters never include pairing credentials or video payloads.
-  const performanceStats = { source: null, transport: null, receiver: null };
+  const performanceStats = { source: null, transport: null };
   Object.defineProperty(window, 'wheelplayStats', { configurable: true, get: () => JSON.parse(JSON.stringify(performanceStats)) });
-  let rtc = null, rtcRequested = false, rtcFps = null;
   let webCodecs = null, webCodecsRequested = false, webCodecsHttpsNotified = false, webCodecsUnsupportedSent = false;
   let webCodecsError = null;
-  // JPEG must not paint over a working WebRTC or WebCodecs picture.
+  // JPEG must not paint over a working WebCodecs picture.
   function videoTransportActive() {
-    return Boolean((rtc && rtc.active) || (webCodecs && webCodecs.active));
+    return Boolean(webCodecs && webCodecs.active);
   }
   let socket = null, stopped = true, paired = false, retry = null, attempts = 0;
   let width = 1280, height = 720, live = false, objectUrl = null, lastFrame = 0, lastStatus = 0;
@@ -665,18 +415,6 @@ if (typeof document !== 'undefined') {
   try { hideToolbarOption.checked = window.localStorage.getItem(hideToolbarPreference) === 'true'; } catch (_) {}
   hideToolbarOption.addEventListener('change', () => {
     try { window.localStorage.setItem(hideToolbarPreference, String(hideToolbarOption.checked)); } catch (_) {}
-  });
-  const canvasOption = $('canvas-video');
-  const canvasPreference = 'wheelplay.canvasVideo';
-  try { canvasOption.checked = window.localStorage.getItem(canvasPreference) === 'true'; } catch (_) {}
-  canvasOption.addEventListener('change', () => {
-    try { window.localStorage.setItem(canvasPreference, String(canvasOption.checked)); } catch (_) {}
-  });
-  const canvasRenderer = createVideoCanvasRenderer(video, canvas, {
-    onFrame: (frameWidth, frameHeight) => {
-      width = frameWidth; height = frameHeight; screen.hidden = true; setLive(true);
-    },
-    onError: () => { if (rtc) rtc.fallback(); },
   });
   const pairApi = async (path, request = null) => {
     const headers = request?.token ? { 'X-Pair-Token': request.token } :
@@ -883,11 +621,17 @@ if (typeof document !== 'undefined') {
     clearTimeout(viewportReportTimer);
     viewportReportTimer = setTimeout(() => {
       if (!socket || socket.readyState !== WebSocket.OPEN || display.hidden) return;
-      const rect = display.getBoundingClientRect(), rawScale = window.devicePixelRatio || 1;
-      const maxEdge = Math.max(rect.width, rect.height) * rawScale;
+      // Measure the browser viewport, not #display: hiding/showing the top bar changes the
+      // display box and must not look like a new CarPlay resolution request. Otherwise the
+      // resulting reconnect flips the waiting/live layout and can loop every second.
+      const root = document.documentElement;
+      const viewWidth = window.innerWidth || root.clientWidth;
+      const viewHeight = window.innerHeight || root.clientHeight;
+      const rawScale = window.devicePixelRatio || 1;
+      const maxEdge = Math.max(viewWidth, viewHeight) * rawScale;
       const scale = maxEdge > 1280 ? rawScale * (1280 / maxEdge) : rawScale;
-      const width = Math.round(rect.width * scale / 2) * 2;
-      const height = Math.round(rect.height * scale / 2) * 2;
+      const width = Math.round(viewWidth * scale / 2) * 2;
+      const height = Math.round(viewHeight * scale / 2) * 2;
       if (width < 320 || height < 240) return;
       const signature = `${width}x${height}`;
       if (signature === lastViewportSignature) return;
@@ -929,7 +673,6 @@ if (typeof document !== 'undefined') {
     live = value;
     screen.classList.toggle('stale', !value);
     spare.classList.toggle('stale', !value);
-    video.classList.toggle('stale', !value);
     canvas.classList.toggle('stale', !value);
     touchSurface.classList.toggle('stale', !value);
     waitingElement.hidden = value;
@@ -1085,20 +828,17 @@ if (typeof document !== 'undefined') {
     canvas.hidden = true;
     screen.hidden = true;
     spare.hidden = true;
-    video.hidden = true;
     setLive(false);
     $('stage').textContent = `WebCodecs 失败：${reason}`;
     $('waiting').hidden = false;
     setStatus(`WebCodecs 失败 · 已停止（不回退 JPEG）：${reason}`, 60000);
   }
-  function cleanupRtc() {
-    if (rtc) rtc.close(); rtc = null; rtcRequested = false; rtcFps = null;
+  function cleanupVideoTransports() {
     if (webCodecs) webCodecs.close(); webCodecs = null;
     webCodecsRequested = false; webCodecsHttpsNotified = false; webCodecsUnsupportedSent = false;
     webCodecsError = null;
     wcCanvas.hidden = true;
-    canvasRenderer.stop();
-    performanceStats.source = performanceStats.transport = performanceStats.receiver = null;
+    performanceStats.source = performanceStats.transport = null;
     if (jpegRendered) {
       canvas.hidden = false;
       screen.hidden = true;
@@ -1106,7 +846,6 @@ if (typeof document !== 'undefined') {
       canvas.hidden = true;
       screen.hidden = !(screen.complete && screen.naturalWidth > 0);
     }
-    video.hidden = true;
   }
   function exitLaunchFullscreen() {
     try { Promise.resolve(document.exitFullscreen()).catch(() => {}); } catch (_) {}
@@ -1138,7 +877,7 @@ if (typeof document !== 'undefined') {
     if (outbox) { outbox.close(); outbox = null; }
     clearTimeout(retry); clearInterval(heartbeat);
     if (socket) { const old = socket; socket = null; old.close(); }
-    cleanupRtc(); cleanupImage(); setLive(false);
+    cleanupVideoTransports(); cleanupImage(); setLive(false);
     browserAudio.close(); $('audio-message').hidden = true;
     $('topbar').hidden = false; $('pairing').hidden = false; $('display').hidden = true;
     invalidateDisplayRect();
@@ -1154,7 +893,6 @@ if (typeof document !== 'undefined') {
     const auth = pairingToken ? `token=${encodeURIComponent(pairingToken)}` : `code=${encodeURIComponent($('code').value)}`;
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stream?${auth}`);
     ws.binaryType = 'arraybuffer';
-    const useCanvas = canvasOption.checked;
     socket = ws;
     const connectTimer = setTimeout(() => ws.close(), 8000);
     ws.onopen = () => {
@@ -1167,7 +905,7 @@ if (typeof document !== 'undefined') {
       } });
       paired = true; attempts = 0; lastStatus = Date.now();
       browserAudio.attach();
-      cleanupRtc();
+      cleanupVideoTransports();
       webCodecs = createWebCodecsReceiver(wcCanvas, { send,
         onReady: () => {
           if (socket !== ws) return;
@@ -1176,7 +914,7 @@ if (typeof document !== 'undefined') {
           stopJpegPipeline(false);
           jpegRendered = false;
           jpegContext = null;
-          canvas.hidden = true; screen.hidden = true; spare.hidden = true; video.hidden = true;
+          canvas.hidden = true; screen.hidden = true; spare.hidden = true;
           wcCanvas.hidden = false;
           setLive(true);
           send({ type: 'webcodecs-ready' });
@@ -1191,30 +929,6 @@ if (typeof document !== 'undefined') {
           if (socket !== ws) return;
           webCodecsFailed(reason);
         },
-      });
-      rtc = createRtcReceiver(video, { send,
-        onTrack: () => { if (useCanvas) canvasRenderer.prepare(); },
-        onReset: () => { canvasRenderer.stop(); if (!jpegRendered) canvas.hidden = true; },
-        onReady: () => {
-          if (socket !== ws) return;
-          if (useCanvas) { stopJpegPipeline(false); jpegRendered = false; jpegContext = null; canvasRenderer.start(); return; }
-          stopJpegPipeline(true);
-          canvas.hidden = true; screen.hidden = true; video.hidden = false;
-          width = video.videoWidth; height = video.videoHeight; setLive(true);
-        },
-        onStop: () => {
-          if (socket !== ws) return;
-          if (jpegRendered) {
-            canvas.hidden = false;
-            screen.hidden = true;
-          } else {
-            canvas.hidden = true;
-            screen.hidden = !(screen.complete && screen.naturalWidth > 0);
-          }
-          video.hidden = true; rtcFps = null;
-          setLive(Boolean(lastFrame && (jpegRendered || screen.naturalWidth)));
-        },
-        onStats: (fps, metrics) => { rtcFps = fps === null ? null : Math.round(fps); performanceStats.receiver = metrics; },
       });
       $('message').textContent = '';
       $('phone-connect').disabled = false;
@@ -1237,10 +951,6 @@ if (typeof document !== 'undefined') {
       if (typeof event.data === 'string') {
         const data = JSON.parse(event.data);
         if (browserAudio.control(data)) return;
-        if (data.type === 'rtc-offer' || data.type === 'rtc-stop') {
-          if (data.type === 'rtc-stop') rtcRequested = false;
-          rtc.receive(data); return;
-        }
         if (data.type === 'webcodecs-stop') {
           webCodecsRequested = false;
           if (webCodecs) webCodecs.close();
@@ -1268,12 +978,6 @@ if (typeof document !== 'undefined') {
           performanceStats.transport = data.performance?.transport ?? null;
           lastStatus = Date.now(); width = data.width; height = data.height;
           $('stage').textContent = data.stage || '等待 iPhone 画面…';
-          rtc.progress(data.rtcFrames || 0);
-          if (data.rtcAvailable && !rtcRequested && typeof RTCPeerConnection !== 'undefined') {
-            rtcRequested = true; send({ type: 'rtc-start' });
-          }
-          // The server resets availability when the iPhone starts a new video configuration.
-          if (!data.rtcAvailable) rtcRequested = false;
           if (data.webCodecsNeedsHttps && !webCodecsHttpsNotified) {
             webCodecsHttpsNotified = true;
             webCodecsFailed('需要 HTTPS 页面（WebCodecs 不在 HTTP 下提供）');
@@ -1299,7 +1003,7 @@ if (typeof document !== 'undefined') {
           // The server resets availability when the iPhone starts a new video configuration.
           if (!data.webCodecsAvailable) webCodecsRequested = false;
           setLive(Boolean(data.streaming &&
-            (rtc.active || webCodecs?.active || lastFrame && (jpegRendered || screen.naturalWidth))));
+            (webCodecs?.active || lastFrame && (jpegRendered || screen.naturalWidth))));
           if (!live && !data.streaming) {
             $('topbar').hidden = Boolean(launchPresentation?.immersive);
           }
@@ -1307,13 +1011,8 @@ if (typeof document !== 'undefined') {
             ? 'WebCodecs 失败（不回退 JPEG）'
             : webCodecs?.active
               ? `${webCodecs.codec === 'H265' ? 'HEVC' : 'H.264'} / WebCodecs`
-              : rtc.active ? `${rtc.codec === 'H265' ? 'HEVC' : 'H.264'} / WebRTC${useCanvas ? ' / Canvas' : ''}${rtcFps === null ? '' : ` · ${rtcFps} fps`}` : `JPEG${data.fallback ? ' · 已回退' : ''}`;
-          // A fallback is a one-shot event that the next JPEG frame would otherwise overwrite
-          // within one frame interval, so hold it long enough to be read.
-          setStatus(
-            live ? `${transport}${rtc.recovering ? ' · 等待恢复' : ''} · 触控已连接` : '已连接 · 等待 iPhone 画面',
-            data.fallback ? 3000 : 0,
-          );
+              : 'JPEG';
+          setStatus(live ? `${transport} · 触控已连接` : '已连接 · 等待 iPhone 画面');
         }
         if (data.type === 'input-unavailable') setStatus('等待 iPhone 触控通道就绪');
         return;
@@ -1369,7 +1068,7 @@ if (typeof document !== 'undefined') {
       if (socket !== ws) return;
       if (outbox) { outbox.close(); outbox = null; }
       cancelMove();
-      socket = null; pointers.clear(); clearInterval(heartbeat); cleanupRtc(); cleanupImage(); setLive(false);
+      socket = null; pointers.clear(); clearInterval(heartbeat); cleanupVideoTransports(); cleanupImage(); setLive(false);
       browserAudio.close(); $('audio-message').hidden = true;
       if (stopped) return;
       if (!deviceCredential && (!paired || ++attempts > 8)) {
@@ -1457,7 +1156,7 @@ if (typeof document !== 'undefined') {
     scheduleViewportReport();
   });
   // A separate layer prevents Android Chrome's native video gestures cancelling drags.
-  for (const surface of [screen, spare, video, canvas, touchSurface]) {
+  for (const surface of [screen, spare, canvas, touchSurface]) {
   surface.addEventListener('contextmenu', event => event.preventDefault());
   surface.addEventListener('pointerdown', event => {
     if (!live || pointers.size >= 2 || (event.pointerType === 'mouse' && event.button !== 0)) return;

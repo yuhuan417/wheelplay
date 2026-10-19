@@ -1,4 +1,4 @@
-// Independent of video transport: the same paired channel works with JPEG and WebRTC.
+// Independent of video transport: the same paired channel works with JPEG and WebCodecs.
 export function decodeAudioPacket(buffer) {
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 22) return null;
   const header = new DataView(buffer);

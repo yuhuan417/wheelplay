@@ -79,7 +79,7 @@ On 2026-10-08, a V2547A device (API 37) was detected. The attempted Debug APK in
 
 | Device check | Status | Acceptance criteria |
 | --- | --- | --- |
-| Wired/wireless iPhone media | Wireless audio/video and artwork reception partly verified | 15:27/15:29 logs confirm seven decoded covers, followed by local clearing on metadata updates; lyric-refresh fix, wired behavior, and controls await retesting |
+| Wireless iPhone media | Wireless audio/video and artwork reception partly verified | 15:27/15:29 logs confirm seven decoded covers, followed by local clearing on metadata updates; lyric-refresh fix and controls await retesting |
 | Android notification/lock screen | Unverified | Controls change iPhone playback; paused progress stops |
 | Page recreation/screen off/home | Unverified | Session persists; stopping the service leaves no session |
 | Browser takeover/disconnection | Unverified | Controls remain available; remote/local types follow actual output |

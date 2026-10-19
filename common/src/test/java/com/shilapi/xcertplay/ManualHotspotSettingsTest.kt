@@ -5,7 +5,6 @@ import android.view.ViewGroup
 import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomnavigation.BottomNavigationView
-import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -31,15 +30,10 @@ class ManualHotspotSettingsTest {
         dialog().getButton(button).performClick()
         shadowOf(android.os.Looper.getMainLooper()).idle()
     }
-    private fun selectManual(activity: DiPlayActivity) {
-        row(activity, "连接网络").performClick()
-        val list = dialog().listView
-        list.performItemClick(list.getChildAt(1), 1, 1L)
-        press()
-    }
     private fun enterCredentials(activity: DiPlayActivity, ssid: String) {
-        selectManual(activity)
+        row(activity, "热点名称").performClick()
         input().setText(ssid); press()
+        row(activity, "热点密码").performClick()
         input().setText(password); press()
     }
     private fun withSettings(block: (DiPlayActivity) -> Unit) {
@@ -54,14 +48,12 @@ class ManualHotspotSettingsTest {
     private fun configureManual(ssid: String = "Original") {
         AirPlayPersistence.saveManualHotspotSsid(context, ssid)
         AirPlayPersistence.saveManualHotspotPassphrase(context, password)
-        AirPlayPersistence.saveWirelessHotspotMode(context, WirelessHotspotMode.MANUAL)
     }
 
     @Test fun firstSetupPreservesSsidAndPasswordWhitespaceAcrossReopening() {
         val ssid = " CarPlayTest "
         withSettings { activity ->
             enterCredentials(activity, ssid)
-            assertEquals(WirelessHotspotMode.MANUAL, AirPlayPersistence.loadWirelessHotspotMode(context))
             assertEquals(ssid, AirPlayPersistence.loadManualHotspotSsid(context))
             assertEquals(password, AirPlayPersistence.loadManualHotspotPassphrase(context))
         }
@@ -101,11 +93,11 @@ class ManualHotspotSettingsTest {
         }
     }
 
-    @Test fun invalidFirstSetupDoesNotEnableManualModeOrSaveCredentials() {
+    @Test fun invalidFirstSetupDoesNotSaveCredentials() {
         withSettings { activity ->
             for (invalid in listOf("   ", "x".repeat(32) + " ", "Test\u0000SSID")) {
-                enterCredentials(activity, invalid)
-                assertEquals(WirelessHotspotMode.WIFI_P2P, AirPlayPersistence.loadWirelessHotspotMode(context))
+                row(activity, "热点名称").performClick()
+                input().setText(invalid); press()
                 assertEquals("", AirPlayPersistence.loadManualHotspotSsid(context))
                 assertEquals("", AirPlayPersistence.loadManualHotspotPassphrase(context))
             }
@@ -114,14 +106,14 @@ class ManualHotspotSettingsTest {
 
     @Test fun cancellingEitherFirstSetupDialogDoesNotSaveCredentials() {
         withSettings { activity ->
-            selectManual(activity)
+            row(activity, "热点名称").performClick()
             input().setText(" CarPlayTest "); press(AlertDialog.BUTTON_NEGATIVE)
             assertEquals("", AirPlayPersistence.loadManualHotspotSsid(context))
-            selectManual(activity)
+            row(activity, "热点名称").performClick()
             input().setText(" CarPlayTest "); press()
+            row(activity, "热点密码").performClick()
             input().setText(password); press(AlertDialog.BUTTON_NEGATIVE)
-            assertEquals(WirelessHotspotMode.WIFI_P2P, AirPlayPersistence.loadWirelessHotspotMode(context))
-            assertEquals("", AirPlayPersistence.loadManualHotspotSsid(context))
+            assertEquals(" CarPlayTest ", AirPlayPersistence.loadManualHotspotSsid(context))
             assertEquals("", AirPlayPersistence.loadManualHotspotPassphrase(context))
         }
     }

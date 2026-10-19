@@ -97,12 +97,9 @@ class DiPlaySessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val teslaRootMode = com.shilapi.xcertplay.web.TeslaHttpCompatibility.config(this).let {
-            it.enabled && it.mode == com.shilapi.xcertplay.network.TeslaHttpMode.ROOT
-        }
         // Wireless standby cuts the radio with `su`; ask for the grant while the user can see the
         // Magisk prompt instead of failing silently when the car cuts power.
-        if (teslaRootMode || AirPlayPersistence.loadWirelessEnabled(this)) RootAccess.checkOnStartup()
+        RootAccess.checkOnStartup()
         com.shilapi.xcertplay.domain.OwnDomainManager.ensureStarted(this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "CarPlay 服务", NotificationManager.IMPORTANCE_LOW))

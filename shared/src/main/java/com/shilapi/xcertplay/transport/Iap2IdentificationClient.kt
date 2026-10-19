@@ -33,7 +33,7 @@ class Iap2WirelessIdentification(
     }
 }
 
-/** Required identity for the minimal wired or wireless iAP2 identification exchange. */
+/** Required identity for the minimal wireless iAP2 identification exchange. */
 data class Iap2IdentificationConfig(
     val name: String,
     val modelIdentifier: String,
@@ -41,39 +41,12 @@ data class Iap2IdentificationConfig(
     val serialNumber: String,
     val firmwareVersion: String,
     val hardwareVersion: String,
-    /** The iPhone USB interface used by CarPlay, supplied explicitly by the deployment. */
-    val carPlayUsbInterfaceNumber: Int,
     val language: String = "en",
     /** This app's own EA protocol identifier; it deliberately does not claim a CarPlay EA flag. */
     val externalAccessoryProtocol: String = "com.shilapi.xcertplay",
     /** Non-null selects the wireless Bluetooth and WirelessCarPlay transport components. */
     val wireless: Iap2WirelessIdentification? = null,
-    /** Advertises and enables iAP2 LocationInformation from the accessory to the phone. */
-    val locationInformationEnabled: Boolean = false,
 ) {
-    constructor(
-        name: String,
-        modelIdentifier: String,
-        manufacturer: String,
-        serialNumber: String,
-        firmwareVersion: String,
-        hardwareVersion: String,
-        wireless: Iap2WirelessIdentification,
-        language: String = "en",
-        externalAccessoryProtocol: String = "com.shilapi.xcertplay",
-    ) : this(
-        name = name,
-        modelIdentifier = modelIdentifier,
-        manufacturer = manufacturer,
-        serialNumber = serialNumber,
-        firmwareVersion = firmwareVersion,
-        hardwareVersion = hardwareVersion,
-        carPlayUsbInterfaceNumber = 0,
-        language = language,
-        externalAccessoryProtocol = externalAccessoryProtocol,
-        wireless = wireless,
-    )
-
     init {
         listOf(name, modelIdentifier, manufacturer, serialNumber, firmwareVersion, hardwareVersion).forEach {
             require(it.isNotBlank()) { "Identification identity strings must not be blank" }
@@ -91,9 +64,6 @@ data class Iap2IdentificationConfig(
             externalAccessoryProtocol,
         ).forEach {
             require('\u0000' !in it) { "NUL-terminated identification strings must not contain U+0000" }
-        }
-        require(carPlayUsbInterfaceNumber in 0..0xff) {
-            "carPlayUsbInterfaceNumber must be in 0..255"
         }
     }
 }
@@ -113,26 +83,29 @@ sealed class Iap2IdentificationException(message: String) : IOException(message)
 }
 
 /**
- * Synchronous accessory-side wired or wireless identification over an already owned CSM channel.
+ * Synchronous accessory-side wireless identification over an already owned CSM channel.
  *
  * This is intentionally only identification: it neither invokes MFi nor itself starts any
  * CarPlay, subscription, power, media, or UI service.
  */
 class Iap2IdentificationClient(private val session: Iap2Session) {
     /** Waits for link negotiation, then completes the 1D00/1D01/1D02 exchange. */
-    @Throws(IphoneUsbException::class, Iap2IdentificationException::class)
+    @Throws(Iap2TransportException::class, Iap2IdentificationException::class)
     fun identify(config: Iap2IdentificationConfig, timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS) {
+        require(config.wireless != null) {
+            "Wireless identification requires a wireless transport identity"
+        }
         require(timeoutMillis in 1..MAXIMUM_TIMEOUT_MILLIS) {
             "timeoutMillis must be in 1..$MAXIMUM_TIMEOUT_MILLIS"
         }
         val deadlineNanos = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
         if (!session.awaitReady(remainingMillis(deadlineNanos))) {
-            throw IphoneUsbException.TimedOut("Timed out waiting for iAP2 control session readiness")
+            throw Iap2TransportException.TimedOut("Timed out waiting for iAP2 control session readiness")
         }
 
         while (true) {
             val frame = session.recv(remainingMillis(deadlineNanos))
-                ?: throw IphoneUsbException.TimedOut("Timed out waiting for iAP2 identification")
+                ?: throw Iap2TransportException.TimedOut("Timed out waiting for iAP2 identification")
             when (frame.messageId) {
                 START_IDENTIFICATION -> session.send(identificationInformation(config), remainingMillis(deadlineNanos))
                 IDENTIFICATION_ACCEPTED -> return
@@ -155,18 +128,10 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
         private const val MAXIMUM_TIMEOUT_MILLIS = 5 * 60 * 1_000L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
-        /** Builds the smallest honest LIVI-compatible wired or wireless IdentificationInformation. */
+        /** Builds the smallest honest LIVI-compatible wireless IdentificationInformation. */
         fun identificationInformation(config: Iap2IdentificationConfig): Iap2Frame {
-            val wireless = config.wireless
-            val sentMessages = if (config.locationInformationEnabled) {
-                MESSAGES_SENT_BY_ACCESSORY + LOCATION_INFORMATION
-            } else {
-                MESSAGES_SENT_BY_ACCESSORY
-            }
-            val receivedMessages = if (config.locationInformationEnabled) {
-                MESSAGES_RECEIVED_FROM_PHONE + START_LOCATION_INFORMATION + STOP_LOCATION_INFORMATION
-            } else {
-                MESSAGES_RECEIVED_FROM_PHONE
+            val wireless = requireNotNull(config.wireless) {
+                "Wireless identification requires a wireless transport identity"
             }
             return Iap2Messages.build(Iap2Endpoints.IDENTIFICATION_INFORMATION) {
                 string(0, config.name)
@@ -177,22 +142,15 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
                 string(5, config.hardwareVersion)
                 u16List(
                     6,
-                    if (wireless == null) {
-                        sentMessages.asIterable()
-                    } else {
-                        sentMessages.filterNot { it == POWER_SOURCE_UPDATE }.toIntArray().asIterable() +
-                            ACCESSORY_WIFI_CONFIGURATION_INFORMATION
-                    },
+                    MESSAGES_SENT_BY_ACCESSORY.asIterable() +
+                        ACCESSORY_WIFI_CONFIGURATION_INFORMATION,
                 )
                 u16List(
                     7,
-                    if (wireless == null) {
-                        receivedMessages.asIterable()
-                    } else {
-                        receivedMessages.asIterable() + WIRELESS_PHONE_MESSAGES.asIterable()
-                    },
+                    MESSAGES_RECEIVED_FROM_PHONE.asIterable() +
+                        WIRELESS_PHONE_MESSAGES.asIterable(),
                 )
-                u8(8, if (wireless == null) 2 else 0)
+                u8(8, 0)
                 u16(9, 20)
                 group(10) {
                     u8(0, 1)
@@ -201,39 +159,21 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
                 }
                 string(12, config.language)
                 strings(13, listOf(config.language))
-                if (wireless == null) {
-                    group(16) {
-                        u16(0, 0)
-                        string(1, "USBHostTransport")
-                        void(2)
-                        u8(3, config.carPlayUsbInterfaceNumber)
-                        void(4)
-                    }
-                } else {
-                    group(17) {
-                        u16(0, 0)
-                        string(1, "blue")
-                        void(2)
-                        bytes(3, wireless.bluetoothMacBytes())
-                        string(4, "blue")
-                        void(5)
-                    }
-                    group(24) {
-                        u16(0, 1)
-                        string(1, wireless.ssid)
-                        void(2)
-                        u16(3, 1)
-                        void(4)
-                        void(5)
-                    }
+                group(17) {
+                    u16(0, 0)
+                    string(1, "blue")
+                    void(2)
+                    bytes(3, wireless.bluetoothMacBytes())
+                    string(4, "blue")
+                    void(5)
                 }
-                if (config.locationInformationEnabled) {
-                    group(22) {
-                        u16(0, 0)
-                        string(1, config.name)
-                        void(17)
-                        void(18)
-                    }
+                group(24) {
+                    u16(0, 1)
+                    string(1, wireless.ssid)
+                    void(2)
+                    u16(3, 1)
+                    void(4)
+                    void(5)
                 }
                 group(30) {
                     u16(0, 42)
@@ -248,7 +188,7 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
 
         private fun remainingMillis(deadlineNanos: Long): Long {
             val remainingNanos = deadlineNanos - System.nanoTime()
-            if (remainingNanos <= 0) throw IphoneUsbException.TimedOut("iAP2 identification timed out")
+            if (remainingNanos <= 0) throw Iap2TransportException.TimedOut("iAP2 identification timed out")
             return min(MAXIMUM_TIMEOUT_MILLIS, (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND)
         }
 
@@ -266,7 +206,6 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
             0x4159, // StopCommunicationsUpdates
             0x4154, // StartCallStateUpdates
             0x4156, // StopCallStateUpdates
-            0xae03, // PowerSourceUpdate
             0x4301, // CarPlayStartSession
         )
         private val MESSAGES_RECEIVED_FROM_PHONE = intArrayOf(
@@ -284,13 +223,7 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
             0x4155, // CallStateUpdate
             0x4300, // CarPlayAvailability
         )
-        private const val POWER_SOURCE_UPDATE = 0xae03
-        private const val CARPLAY_AVAILABILITY = 0x4300
-        private const val CARPLAY_START_SESSION = 0x4301
         private const val ACCESSORY_WIFI_CONFIGURATION_INFORMATION = 0x5703
-        private const val LOCATION_INFORMATION = 0xfffb
-        private const val START_LOCATION_INFORMATION = 0xfffa
-        private const val STOP_LOCATION_INFORMATION = 0xfffc
         private val WIRELESS_PHONE_MESSAGES = intArrayOf(0x4e0d, 0x4e0e, 0x5702)
     }
 }

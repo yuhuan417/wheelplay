@@ -13,9 +13,6 @@ import com.shilapi.xcertplay.airplay.SafeAreaCodec
 import com.shilapi.xcertplay.airplay.SafeAreaRect
 import com.shilapi.xcertplay.orchestration.ManualHotspotBand
 import com.shilapi.xcertplay.orchestration.ManualHotspotSecurity
-import com.shilapi.xcertplay.orchestration.MfiTarget
-import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
-import com.shilapi.xcertplay.transport.LockdownPairRecord
 import java.io.File
 
 /** SharedPreferences persistence for the accessory identity and paired controllers. */
@@ -25,22 +22,11 @@ object AirPlayPersistence {
     private const val KEY_IDENT_PUBLIC = "identity_public"
     private const val KEY_PAIRING_ID = "pairing_id"
     private const val KEY_PAIRING_IDS = "pairing_ids"
-    private const val KEY_LOCKDOWN_HOST_ID = "lockdown_host_id"
-    private const val KEY_LOCKDOWN_SYSTEM_BUID = "lockdown_system_buid"
-    private const val KEY_LOCKDOWN_WIFI_MAC = "lockdown_wifi_mac"
-    private const val KEY_LOCKDOWN_DEVICE_PUBLIC = "lockdown_device_public"
-    private const val KEY_LOCKDOWN_DEVICE_CERT = "lockdown_device_cert"
-    private const val KEY_LOCKDOWN_HOST_PRIVATE = "lockdown_host_private"
-    private const val KEY_LOCKDOWN_HOST_CERT = "lockdown_host_cert"
-    private const val KEY_LOCKDOWN_ROOT_PRIVATE = "lockdown_root_private"
-    private const val KEY_LOCKDOWN_ROOT_CERT = "lockdown_root_cert"
     private const val KEY_DISPLAY_SCALE_TENTHS = "display_scale_tenths"
     private const val KEY_UI_SCALE_PERCENT = "ui_scale_percent"
     private const val KEY_HEVC_ENABLED = "hevc_enabled"
     private const val KEY_HEVC_SOFTWARE_DECODER = "hevc_software_decoder"
     private const val KEY_ADVANCED_AUDIO_CHANNEL_MAPPING = "advanced_audio_channel_mapping"
-    private const val KEY_WIRELESS_ENABLED = "wireless_enabled"
-    private const val KEY_WIRELESS_HOTSPOT_MODE = "wireless_hotspot_mode"
     private const val KEY_MANUAL_HOTSPOT_SSID = "manual_hotspot_ssid"
     private const val KEY_MANUAL_HOTSPOT_PASSPHRASE = "manual_hotspot_passphrase"
     private const val KEY_MANUAL_HOTSPOT_BAND = "manual_hotspot_band"
@@ -49,13 +35,9 @@ object AirPlayPersistence {
     private const val KEY_MANUAL_HOTSPOT_CHANNEL_PERMISSION_PROMPT_DISMISSED =
         "manual_hotspot_channel_permission_prompt_dismissed"
     private const val KEY_DEBUG_LOGS_ENABLED = "debug_logs_enabled"
-    private const val KEY_MANUFACTURER = "manufacturer"
     private const val KEY_MODEL = "model"
-    private const val KEY_OEM_LABEL = "oem_label"
-    private const val KEY_OEM_LABEL_MIGRATED = "oem_label_migrated"
     private const val KEY_FPS = "display_fps"
     private const val KEY_STREAM_TECHNOLOGY = "web_stream_technology"
-    private const val KEY_RTC_RECOVERY = "web_rtc_recovery"
     private const val KEY_MEDIA_BUFFER_MS = "media_buffer_ms"
     private const val KEY_WIDTH_PHYSICAL_MM = "display_width_physical_mm"
     private const val KEY_PHYSICAL_SIZE_BASIS = "display_physical_size_basis"
@@ -73,17 +55,10 @@ object AirPlayPersistence {
     private const val KEY_SAFE_MARGINS = "carplay_safe_margins"
     private const val KEY_SAFE_AREA_DRAW_OUTSIDE = "safe_area_draw_outside"
     private const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
-    private const val KEY_LOCATION_REPORTING_ENABLED = "location_reporting_enabled"
-    private const val KEY_MFI_TARGET = "mfi_target"
-    private const val KEY_MFI_I2C_PATH = "mfi_i2c_path"
-    private const val KEY_REMOTE_MFI_SERVER = "remote_mfi_server"
-    private const val KEY_REMOTE_MFI_TOKEN = "remote_mfi_token"
     private const val SAFE_AREA_KEY_PREFIX = "safe_area_"
-    private const val CUSTOM_ICON_FILE = "airplay-icon.png"
 
     const val DEFAULT_MODEL = "WheelPlay"
-    const val DEFAULT_SIMULATED_MANUFACTURER_NAME = "NIO"
-    const val DEFAULT_MFI_I2C_PATH = "/dev/i2c-1"
+    const val DEFAULT_MANUFACTURER_NAME = "NIO"
 
     fun loadBrowserAudioPlayback(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_BROWSER_AUDIO_PLAYBACK, false)
@@ -182,82 +157,6 @@ object AirPlayPersistence {
             .apply()
     }
 
-    fun loadWirelessEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_WIRELESS_ENABLED, true)
-
-    fun saveWirelessEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_WIRELESS_ENABLED, enabled)
-            .apply()
-    }
-
-    fun loadMfiTarget(context: Context): MfiTarget {
-        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_MFI_TARGET, null)
-        return MfiTarget.entries.firstOrNull { it.name == stored } ?: MfiTarget.LOCAL
-    }
-
-    fun saveMfiTarget(context: Context, target: MfiTarget) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_MFI_TARGET, target.name)
-            .apply()
-    }
-
-    fun loadMfiI2cPath(context: Context): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_MFI_I2C_PATH, null)
-            ?.takeIf { it.isNotBlank() }
-            ?: DEFAULT_MFI_I2C_PATH
-
-    fun saveMfiI2cPath(context: Context, path: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_MFI_I2C_PATH, path.trim())
-            .apply()
-    }
-
-    fun loadRemoteMfiServer(context: Context): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_REMOTE_MFI_SERVER, null)
-            .orEmpty()
-
-    fun saveRemoteMfiServer(context: Context, server: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_REMOTE_MFI_SERVER, server)
-            .apply()
-    }
-
-    fun loadRemoteMfiToken(context: Context): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_REMOTE_MFI_TOKEN, null)
-            .orEmpty()
-
-    fun saveRemoteMfiToken(context: Context, token: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_REMOTE_MFI_TOKEN, token)
-            .apply()
-    }
-
-    fun loadWirelessHotspotMode(context: Context): WirelessHotspotMode {
-        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_WIRELESS_HOTSPOT_MODE, null)
-        val mode = WirelessHotspotMode.entries.firstOrNull { it.name == stored }
-            ?: WirelessHotspotMode.WIFI_P2P
-        return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
-            mode == WirelessHotspotMode.WIFI_P2P
-        ) {
-            WirelessHotspotMode.LOCAL_ONLY_HOTSPOT
-        } else {
-            mode
-        }
-    }
-
-    fun saveWirelessHotspotMode(context: Context, mode: WirelessHotspotMode) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_WIRELESS_HOTSPOT_MODE, mode.name)
-            .apply()
-    }
-
     fun loadManualHotspotSsid(context: Context): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_MANUAL_HOTSPOT_SSID, null)
@@ -351,16 +250,6 @@ object AirPlayPersistence {
             .apply()
     }
 
-    fun loadLocationReportingEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_LOCATION_REPORTING_ENABLED, false)
-
-    fun saveLocationReportingEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_LOCATION_REPORTING_ENABLED, enabled)
-            .apply()
-    }
-
     fun loadModel(context: Context): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_MODEL, null)
@@ -374,29 +263,6 @@ object AirPlayPersistence {
             .apply()
     }
 
-    fun loadSimulatedManufacturerName(context: Context): String {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val stored = prefs.getString(KEY_OEM_LABEL, null)
-        // Upgrade the previous default once, while allowing users to choose BYD again later.
-        val legacyDefault = stored == "BYD" && !prefs.getBoolean(KEY_OEM_LABEL_MIGRATED, false)
-        // iOS hides the car icon without a label.
-        val name = (if (legacyDefault) DEFAULT_SIMULATED_MANUFACTURER_NAME else stored)?.trim()?.takeIf { it.isNotBlank() }
-            ?: prefs.getString(KEY_MANUFACTURER, null)
-                ?.takeIf { it.isNotBlank() && it != "WheelPlay" && it != "DiPlay" && it != "DiPlay Web" }
-            ?: DEFAULT_SIMULATED_MANUFACTURER_NAME
-        if (stored != name || !prefs.getBoolean(KEY_OEM_LABEL_MIGRATED, false)) {
-            prefs.edit().putString(KEY_OEM_LABEL, name).putBoolean(KEY_OEM_LABEL_MIGRATED, true).apply()
-        }
-        return name
-    }
-
-    fun saveSimulatedManufacturerName(context: Context, name: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_OEM_LABEL, name.trim().ifBlank { DEFAULT_SIMULATED_MANUFACTURER_NAME })
-            .putBoolean(KEY_OEM_LABEL_MIGRATED, true)
-            .apply()
-    }
-
     fun loadFps(context: Context): Int = AirPlayDisplaySettings.sanitizeFps(
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getInt(KEY_FPS, 30),
@@ -405,21 +271,11 @@ object AirPlayPersistence {
     fun loadStreamTechnology(context: Context): com.shilapi.xcertplay.web.StreamTechnology {
         val value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_STREAM_TECHNOLOGY, null)
         return com.shilapi.xcertplay.web.StreamTechnology.entries.firstOrNull { it.name == value }
-            ?: com.shilapi.xcertplay.web.StreamTechnology.WEBRTC
+            ?: com.shilapi.xcertplay.web.StreamTechnology.JPEG
     }
 
     fun saveStreamTechnology(context: Context, value: com.shilapi.xcertplay.web.StreamTechnology) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_STREAM_TECHNOLOGY, value.name).apply()
-    }
-
-    fun loadRtcRecoveryPolicy(context: Context): com.shilapi.xcertplay.web.RtcRecoveryPolicy {
-        val value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_RTC_RECOVERY, null)
-        return com.shilapi.xcertplay.web.RtcRecoveryPolicy.entries.firstOrNull { it.name == value }
-            ?: com.shilapi.xcertplay.web.RtcRecoveryPolicy.BALANCED
-    }
-
-    fun saveRtcRecoveryPolicy(context: Context, value: com.shilapi.xcertplay.web.RtcRecoveryPolicy) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_RTC_RECOVERY, value.name).apply()
     }
 
     fun loadMediaBufferMillis(context: Context): Int = com.shilapi.xcertplay.media.MediaAudioBuffer.sanitize(
@@ -578,37 +434,6 @@ object AirPlayPersistence {
         if (commit) editor.commit() else editor.apply()
     }
 
-    @Synchronized
-    fun loadCustomAirPlayIconFile(context: Context): File? {
-        val file = AtomicFile(File(context.filesDir, CUSTOM_ICON_FILE))
-        // Recover the last complete icon if a previous write was interrupted.
-        try { file.openRead().close() } catch (_: java.io.FileNotFoundException) { return null }
-        return file.baseFile
-    }
-
-    @Synchronized
-    fun saveCustomAirPlayIcon(context: Context, encodedImage: ByteArray) {
-        require(encodedImage.isNotEmpty()) { "AirPlay icon data must not be empty" }
-        val file = AtomicFile(File(context.filesDir, CUSTOM_ICON_FILE))
-        val output = file.startWrite()
-        try {
-            output.write(encodedImage)
-            file.finishWrite(output)
-        } catch (error: Exception) {
-            file.failWrite(output)
-            throw error
-        }
-    }
-
-    @Synchronized
-    fun clearCustomAirPlayIcon(context: Context) {
-        val file = AtomicFile(File(context.filesDir, CUSTOM_ICON_FILE))
-        file.delete()
-        check(!file.baseFile.exists() && !File(file.baseFile.path + ".bak").exists()) {
-            "Could not delete custom AirPlay icon"
-        }
-    }
-
     fun loadIdentity(context: Context): AirPlayIdentity {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val privateKey = prefs.getString(KEY_IDENT_PRIVATE, null)
@@ -642,62 +467,6 @@ object AirPlayPersistence {
         prefs.edit()
             .putString("pairing.$identifier", longTermPublicKey.toHex())
             .putStringSet(KEY_PAIRING_IDS, identifiers)
-            .apply()
-    }
-
-    fun loadLockdownRecord(context: Context): LockdownPairRecord? {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val hostId = prefs.getString(KEY_LOCKDOWN_HOST_ID, null) ?: return null
-        val systemBuid = prefs.getString(KEY_LOCKDOWN_SYSTEM_BUID, null) ?: return null
-        val wifiMac = prefs.getString(KEY_LOCKDOWN_WIFI_MAC, null) ?: return null
-        val devicePublic = prefs.getString(KEY_LOCKDOWN_DEVICE_PUBLIC, null) ?: return null
-        val deviceCert = prefs.getString(KEY_LOCKDOWN_DEVICE_CERT, null) ?: return null
-        val hostPrivate = prefs.getString(KEY_LOCKDOWN_HOST_PRIVATE, null) ?: return null
-        val hostCert = prefs.getString(KEY_LOCKDOWN_HOST_CERT, null) ?: return null
-        val rootPrivate = prefs.getString(KEY_LOCKDOWN_ROOT_PRIVATE, null) ?: return null
-        val rootCert = prefs.getString(KEY_LOCKDOWN_ROOT_CERT, null) ?: return null
-        return try {
-            LockdownPairRecord.restore(
-                hostId = hostId,
-                systemBuid = systemBuid,
-                wifiMacAddress = wifiMac,
-                devicePublicKeyPem = devicePublic.decodeHex(),
-                deviceCertificatePem = deviceCert.decodeHex(),
-                hostPrivateKeyPem = hostPrivate.decodeHex(),
-                hostCertificatePem = hostCert.decodeHex(),
-                rootPrivateKeyPem = rootPrivate.decodeHex(),
-                rootCertificatePem = rootCert.decodeHex(),
-            )
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    fun saveLockdownRecord(context: Context, record: LockdownPairRecord) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_LOCKDOWN_HOST_ID, record.hostId)
-            .putString(KEY_LOCKDOWN_SYSTEM_BUID, record.systemBuid)
-            .putString(KEY_LOCKDOWN_WIFI_MAC, record.wifiMacAddress)
-            .putString(KEY_LOCKDOWN_DEVICE_PUBLIC, record.devicePublicKeyPem.toHex())
-            .putString(KEY_LOCKDOWN_DEVICE_CERT, record.deviceCertificatePem.toHex())
-            .putString(KEY_LOCKDOWN_HOST_PRIVATE, record.hostPrivateKeyPem.toHex())
-            .putString(KEY_LOCKDOWN_HOST_CERT, record.hostCertificatePem.toHex())
-            .putString(KEY_LOCKDOWN_ROOT_PRIVATE, record.rootPrivateKeyPem.toHex())
-            .putString(KEY_LOCKDOWN_ROOT_CERT, record.rootCertificatePem.toHex())
-            .apply()
-    }
-
-    fun clearLockdownRecord(context: Context) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .remove(KEY_LOCKDOWN_HOST_ID)
-            .remove(KEY_LOCKDOWN_SYSTEM_BUID)
-            .remove(KEY_LOCKDOWN_WIFI_MAC)
-            .remove(KEY_LOCKDOWN_DEVICE_PUBLIC)
-            .remove(KEY_LOCKDOWN_DEVICE_CERT)
-            .remove(KEY_LOCKDOWN_HOST_PRIVATE)
-            .remove(KEY_LOCKDOWN_HOST_CERT)
-            .remove(KEY_LOCKDOWN_ROOT_PRIVATE)
-            .remove(KEY_LOCKDOWN_ROOT_CERT)
             .apply()
     }
 

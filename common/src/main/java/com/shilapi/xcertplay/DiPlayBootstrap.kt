@@ -2,7 +2,6 @@ package com.shilapi.xcertplay
 
 import android.content.Context
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
-import com.shilapi.xcertplay.orchestration.MfiTarget
 import java.security.MessageDigest
 
 /** Uses user-imported resources, with optional privately provisioned APK assets as a fallback. */
@@ -22,7 +21,6 @@ internal object DiPlayBootstrap {
             )
         }
         store.load()
-        AirPlayPersistence.saveMfiTarget(context, MfiTarget.LOCAL)
         AirPlayPersistence.saveDebugLogsEnabled(context, false)
     }
 

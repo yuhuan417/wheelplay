@@ -23,7 +23,6 @@ import org.robolectric.annotation.RealObject
 @Config(sdk = [29])
 class TeslaHttpLifecycleTest {
     class RoutingVpnService : CarPlayVpnService() {
-        fun allocateWiredTunnel() = establishTunnel("fe80::1")
         fun allocateTeslaTunnel(address: String) = establishTeslaTunnel(address)
     }
 
@@ -34,7 +33,6 @@ class TeslaHttpLifecycleTest {
         val routes = mutableListOf<Pair<String, Int>>()
         val families = mutableSetOf<Int>()
         var bypass = false
-        val allowedApplications = mutableListOf<String>()
         @Implementation fun addAddress(address: String, prefix: Int): android.net.VpnService.Builder {
             addresses.add(address to prefix); return builder
         }
@@ -45,9 +43,6 @@ class TeslaHttpLifecycleTest {
             families.add(family); return builder
         }
         @Implementation fun allowBypass(): android.net.VpnService.Builder { bypass = true; return builder }
-        @Implementation fun addAllowedApplication(packageName: String): android.net.VpnService.Builder {
-            allowedApplications.add(packageName); return builder
-        }
         @Implementation fun establish(): ParcelFileDescriptor {
             plans.add(this)
             val pipe = ParcelFileDescriptor.createPipe()
@@ -83,26 +78,6 @@ class TeslaHttpLifecycleTest {
         }
     }
 
-    @Test
-    @Config(shadows = [AllocatingBuilderShadow::class])
-    fun wiredVpnOnlyRoutesItsOriginalIpv6Link() {
-        AllocatingBuilderShadow.plans.clear()
-        val controller = Robolectric.buildService(RoutingVpnService::class.java).create()
-        try {
-            controller.get().allocateWiredTunnel().close()
-            val plan = AllocatingBuilderShadow.plans.single()
-            assertEquals(listOf("fe80::1" to 64), plan.addresses)
-            assertEquals(listOf("fe80::" to 64), plan.routes)
-            assertEquals(setOf(android.system.OsConstants.AF_INET, android.system.OsConstants.AF_INET6), plan.families)
-            assertEquals(listOf(controller.get().packageName), plan.allowedApplications)
-        } finally {
-            controller.destroy()
-            AllocatingBuilderShadow.peers.forEach { it.close() }
-            AllocatingBuilderShadow.peers.clear()
-            AllocatingBuilderShadow.plans.clear()
-        }
-    }
-
     @Test fun wirelessAttachDetachAndVpnRevocationNeverAllocateATunnel() {
         val controller = Robolectric.buildService(RoutingVpnService::class.java).create()
         val service = controller.get()
@@ -115,7 +90,7 @@ class TeslaHttpLifecycleTest {
                 object : AirPlaySessionListener {}, object : AirPlayMediaHandler {}))
             assertTrue(service.isAttached())
             service.onRevoke()
-            assertTrue("Wireless listener is independent of the wired VPN", service.isAttached())
+            assertTrue("Wireless listener is independent of the Tesla VPN", service.isAttached())
             service.detach()
             assertFalse(service.isAttached())
         } finally { controller.destroy() }

@@ -5,8 +5,6 @@ import java.io.Closeable
 import java.net.InetAddress
 
 enum class WirelessHotspotBackend(val label: String) {
-    WIFI_P2P("Wi-Fi P2P"),
-    LOCAL_ONLY_HOTSPOT("LocalOnlyHotspot"),
     MANUAL_HOTSPOT("Manual hotspot"),
 }
 
@@ -42,12 +40,7 @@ interface WirelessHotspotManager : Closeable {
     fun onCarPlayConfirmed() {}
 }
 
-/**
- * Converts IEEE 802.11 frequency in MHz to its channel number.
- *
- * Android's [android.net.wifi.p2p.WifiP2pGroup.getFrequency] reports MHz, while the iAP2
- * wireless CarPlay payload expects a channel number.
- */
+/** Converts an IEEE 802.11 frequency in MHz to its channel number. */
 internal fun wifiFrequencyMhzToChannel(frequencyMHz: Int): Int? = when {
     frequencyMHz in 2412..2472 && (frequencyMHz - 2407) % 5 == 0 ->
         (frequencyMHz - 2407) / 5

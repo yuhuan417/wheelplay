@@ -12,12 +12,13 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.Keep
 import com.shilapi.xcertplay.network.CarHotspotStatus
-import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
+import com.shilapi.xcertplay.network.WifiUplink
 import com.shilapi.xcertplay.web.RootAccess
 import java.lang.reflect.Proxy
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Uses Root (`su`) during power-save standby to completely power down the system Wi-Fi radio and
@@ -28,6 +29,8 @@ internal object RootRadioPower {
     private const val TAG = "xcertplay-usb"
     private const val TETHERING_WIFI = 0
     private const val STANDBY_DEBOUNCE_MILLIS = 3_000L
+    private const val WIFI_UPLINK_TIMEOUT_MILLIS = 30_000L
+    private const val WIFI_UPLINK_POLL_MILLIS = 250L
     private const val RADIO_OFF_CHECKS = 3
     private const val RADIO_OFF_RECHECK_MILLIS = 500L
     private const val SHELL_PATH =
@@ -65,6 +68,9 @@ internal object RootRadioPower {
     @Volatile
     private var lastStandbyRequestAt = 0L
 
+    /** Aborts a Wi-Fi uplink wait as soon as power is cut again. */
+    private val wakeGeneration = AtomicInteger(0)
+
     /**
      * Overridable in unit tests so Robolectric tests never spawn real `su` processes.
      * On real Android devices (`Build.FINGERPRINT != "robolectric"`), always attempt `su -c`
@@ -84,23 +90,16 @@ internal object RootRadioPower {
     @Volatile
     internal var verifyRadioOff: (Context) -> Boolean = ::defaultVerifyRadioOff
 
-    fun enterStandby(context: Context, onComplete: ((Boolean) -> Unit)? = null) {
-        val appContext = context.applicationContext
-        val wifiEnabledNow = runCatching {
-            appContext.getSystemService(WifiManager::class.java)?.isWifiEnabled == true
-        }.getOrDefault(false)
-        val wirelessMode = runCatching { AirPlayPersistence.loadWirelessEnabled(appContext) }.getOrDefault(true)
-        val hotspotMode = runCatching { AirPlayPersistence.loadWirelessHotspotMode(appContext) }
-            .getOrDefault(WirelessHotspotMode.WIFI_P2P)
-        val hotspotEnabledNow = runCatching { CarHotspotStatus.isEnabled(appContext) == true }.getOrDefault(false)
+    /** Test seam for the pre-hotspot check that a Wi-Fi uplink is actually connected. */
+    @Volatile
+    internal var wifiUplinkReady: (Context) -> Boolean = WifiUplink::isReady
 
-        if (!suspendedByStandby) {
-            restoreWifiOnWake = wifiEnabledNow || wirelessMode
-            restoreHotspotOnWake = hotspotEnabledNow || hotspotMode == WirelessHotspotMode.MANUAL
-        } else {
-            if (wifiEnabledNow) restoreWifiOnWake = true
-            if (hotspotEnabledNow || hotspotMode == WirelessHotspotMode.MANUAL) restoreHotspotOnWake = true
-        }
+    fun enterStandby(context: Context, onComplete: ((Boolean) -> Unit)? = null) {
+        wakeGeneration.incrementAndGet()
+        val appContext = context.applicationContext
+        // The only CarPlay transport is wireless and uses the configured manual hotspot.
+        restoreWifiOnWake = true
+        restoreHotspotOnWake = true
         val duplicate = synchronized(this) {
             val now = SystemClock.elapsedRealtime()
             val duplicate = suspendedByStandby && now - lastStandbyRequestAt < STANDBY_DEBOUNCE_MILLIS
@@ -176,12 +175,10 @@ internal object RootRadioPower {
     }
 
     fun wakeFromStandby(context: Context, onComplete: (() -> Unit)? = null) {
+        val generation = wakeGeneration.incrementAndGet()
         val appContext = context.applicationContext
-        val wirelessMode = runCatching { AirPlayPersistence.loadWirelessEnabled(appContext) }.getOrDefault(true)
-        val hotspotMode = runCatching { AirPlayPersistence.loadWirelessHotspotMode(appContext) }
-            .getOrDefault(WirelessHotspotMode.WIFI_P2P)
-        val needWifi = restoreWifiOnWake || wirelessMode
-        val needHotspot = restoreHotspotOnWake || hotspotMode == WirelessHotspotMode.MANUAL
+        val needWifi = true
+        val needHotspot = true
         val wasSuspended = suspendedByStandby
         suspendedByStandby = false
 
@@ -196,24 +193,63 @@ internal object RootRadioPower {
 
                 val apkPath = appContext.applicationInfo?.sourceDir.orEmpty()
                 val packageName = appContext.packageName
-                val script = buildWakeScript(
-                    apkPath = apkPath,
-                    packageName = packageName,
-                    enableWifi = needWifi,
-                    enableHotspot = needHotspot,
-                )
-                val ok = executeRootScript(script)
-                if (needWifi || needHotspot) {
-                    runCatching {
-                        BinderRadioControl.startWifiAndHotspot(
-                            context = appContext,
-                            callerPkg = packageName,
-                            enableWifi = needWifi,
-                            enableHotspot = needHotspot,
-                        )
+
+                // Phase 1: bring the Wi-Fi uplink up and wait for it to actually connect. Starting
+                // the SoftAP before the STA association exists makes clients (Tesla, iPhone) see a
+                // hotspot without internet and reject or leave it.
+                val wifiScriptOk = if (needWifi) {
+                    executeRootScript(
+                        buildWakeScript(
+                            apkPath = apkPath,
+                            packageName = packageName,
+                            enableWifi = true,
+                            enableHotspot = false,
+                        ),
+                    ).also {
+                        runCatching {
+                            BinderRadioControl.startWifiAndHotspot(
+                                context = appContext,
+                                callerPkg = packageName,
+                                enableWifi = true,
+                                enableHotspot = false,
+                            )
+                        }
                     }
+                } else {
+                    true
                 }
-                log("Wake radio power-on executed (ok=$ok, wifi=$needWifi, hotspot=$needHotspot)")
+                val wifiReady = if (needWifi) awaitWifiUplink(appContext, generation) else true
+                if (needWifi) {
+                    log("Wake Wi-Fi uplink ready=$wifiReady (script=$wifiScriptOk)")
+                }
+
+                // Phase 2: only now start tethering/SoftAP.
+                val hotspotScriptOk = if (needHotspot) {
+                    executeRootScript(
+                        buildWakeScript(
+                            apkPath = apkPath,
+                            packageName = packageName,
+                            enableWifi = false,
+                            enableHotspot = true,
+                        ),
+                    ).also {
+                        runCatching {
+                            BinderRadioControl.startWifiAndHotspot(
+                                context = appContext,
+                                callerPkg = packageName,
+                                enableWifi = false,
+                                enableHotspot = true,
+                            )
+                        }
+                    }
+                } else {
+                    true
+                }
+                log(
+                    "Wake radio power-on executed (wifiScript=$wifiScriptOk " +
+                        "hotspotScript=$hotspotScriptOk wifiReady=$wifiReady " +
+                        "wifi=$needWifi hotspot=$needHotspot)",
+                )
             } finally {
                 onComplete?.invoke()
             }
@@ -277,9 +313,6 @@ internal object RootRadioPower {
                 // Standby brought the whole radio down; tethering needs the interface back up.
                 appendLine("ip link set wlan0 up >/dev/null 2>&1 || true")
             }
-            if (enableWifi) {
-                appendLine("sleep 1")
-            }
             if (apkPath.isNotBlank()) {
                 val helperSys = "CLASSPATH='$apkPath' /system/bin/app_process /system/bin com.shilapi.xcertplay.RootHotspotMain start android"
                 val helperRoot = "CLASSPATH='$apkPath' /system/bin/app_process /system/bin com.shilapi.xcertplay.RootHotspotMain start $packageName"
@@ -290,6 +323,27 @@ internal object RootRadioPower {
             appendLine("cmd tethering start wifi >/dev/null 2>&1 || true")
         }
         appendLine("exit 0")
+    }
+
+    private fun awaitWifiUplink(context: Context, generation: Int): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + WIFI_UPLINK_TIMEOUT_MILLIS
+        var lastLog = 0L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (generation != wakeGeneration.get()) return false
+            if (wifiUplinkReady(context)) return true
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastLog >= 5_000L) {
+                lastLog = now
+                log("Waiting for the Wi-Fi uplink before starting the hotspot")
+            }
+            try {
+                Thread.sleep(WIFI_UPLINK_POLL_MILLIS)
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return generation == wakeGeneration.get() && wifiUplinkReady(context)
     }
 
     private fun defaultExecuteRootScript(script: String): Boolean = try {

@@ -34,7 +34,7 @@ Android 模块和 Gradle 配置已迁至项目根目录，原版资料归档至 
 
 本地认证资产现已配置，用户已重新配对并选择 iPhone；仍未验证完整 CarPlay 连接、真实触摸响应、熄屏串流、无线并发、长时间稳定性、温度、带宽或端到端延迟。Robolectric 服务生命周期测试不能代替这些真机验证。
 
-建议首次实测先用 USB 连接 iPhone，Android 服务端与车机浏览器连接同一路由器；确认画面四角方向、点按/拖动、双指松开顺序、浏览器断线重连与服务端熄屏，再验证无线 CarPlay。
+建议首次实测先用无线连接 iPhone，Android 服务端与车机浏览器连接同一路由器；确认画面四角方向、点按/拖动、双指松开顺序、浏览器断线重连与服务端熄屏。
 
 ## 本地认证资产打包复核
 
@@ -136,7 +136,7 @@ applicationId 改为 moe.feng.wheelplay，Debug 版保留 .debug 后缀。assemb
 
 ## 次要操作按钮收紧（2026-09-29）
 
-服务端当前页面中的管理 iPhone、停止服务、断开连接、USB 连接、热点设置、应用权限、系统蓝牙设置、无线连接帮助、诊断导出、取消扫描和返回服务面板统一改成右对齐的 wrap_content 按钮。次要按钮保留 48dp 最小触控高度；扫码配对和连接 iPhone 保留全宽主要按钮。图片裁剪页底部操作也改为右对齐自适应宽度。
+服务端当前页面中的管理 iPhone、停止服务、断开连接、热点设置、应用权限、系统蓝牙设置、无线连接帮助、诊断导出、取消扫描和返回服务面板统一改成右对齐的 wrap_content 按钮。次要按钮保留 48dp 最小触控高度；扫码配对和连接 iPhone 保留全宽主要按钮。图片裁剪页底部操作也改为右对齐自适应宽度。
 
 assembleDebug 与 6 项 ServerNavigationTest 通过。已检查 320dp 窄屏和 130% 字体渲染截图中的启动、iPhone、设置页面，次要按钮按内容宽度靠右，主按钮保持全宽。通过 adb install -r 安装新版。
 
@@ -146,15 +146,9 @@ assembleDebug 与 6 项 ServerNavigationTest 通过。已检查 320dp 窄屏和 
 
 APK 构建成功，7 项 UI 测试通过，其中新增双方向测试验证图标实际位于对应的起始侧、尺寸与文字同色。已检查两种方向的原生渲染截图，且通过 adb install -r 安装新版。
 
-## 浏览器 Canvas 视频显示（2026-09-29）
+## WebRTC 移除（2026-10-19）
 
-网页连接界面增加默认关闭的「使用 Canvas 显示视频（实验性）」。当前浏览器保存选择；WebRTC 解码 video 保持 DOM 布局并移到屏幕外，可见画布通过 drawImage 绘制。优先视频帧回调；无此 API 或回调超过 250 ms 未到达时使用动画帧刷新。绘制失败回退 JPEG，断开 / 媒体更换取消刷新并释放画布缓冲。
-
-- `npm test`：39 项通过；`npm run check` 与 `git diff --check` 通过。新增测试覆盖默认原生视频、选择保存 / 存储禁用、离屏帧复制、动态分辨率、旧浏览器、停顿恢复、迟到回调、JPEG 回退、触控和重连。修正配对测试夹具，使图像赋值触发 onload；修复迟到 JPEG onload 在视频就绪后重新显示旧图片的问题。
-- 真实 Chrome + 本地 WebRTC/H.264 合成画面：验证 Canvas 红 / 蓝像素和持续动画，分别检查正常 API、禁用视频帧回调、模拟帧回调不触发三种情况。真实解码从 1280×720 切换到 720×1280 后，像素和比例保持正确；黑边点击不发送触控，画面中心按下 / 松开正确映射；断开清空画布、刷新保留选择、关闭选项恢复原生 video。测试使用合成信令与浏览器发送端，不能代替 Android / iPhone 端到端验证。
-- 已检查 1280px / 390px 连接界面及横竖画面截图，文件保存在 Git 忽略的 `.local/canvas-qa/`。本机 VPN 会让无媒体权限的 Chrome 测试只公布 VPN ICE 地址；测试用隔离浏览器和虚拟摄像头授权让本地 WebRTC 可连接，产品代码仍不申请摄像头或麦克风权限。
-- `:mobile:assembleDebug --no-configuration-cache` 通过；APK 中的 app.js / index.html / style.css 与当前源码逐字节一致。首次离线构建因当前工程新引入的 Quickie 1.12.0 未缓存而失败，在线构建完成依赖下载后成功；本次未安装到设备。
-- 尚未验证蔚来实机、前进档遮罩、功耗或端到端延迟。Canvas 模式不承诺绕过系统级遮罩或恢复被系统暂停的解码；需停车验证。
+目标车机浏览器（Tesla Chrome）不使用 WebRTC 视频直通，已删除 WebRTC/Canvas 显示路径及其原生 libdatachannel 依赖。网页视频仅保留 JPEG 与 WebCodecs 两种模式；JPEG 为默认值。原生库只保留 Mbed TLS，用于 AirPlay 视频帧解密。
 
 ## 首页卡片与连接操作收紧（2026-09-30）
 
@@ -182,7 +176,7 @@ APK 构建成功，7 项 UI 测试通过，其中新增双方向测试验证图�
 - `npm test`：54 项通过；`npm run check`、预览脚本语法检查和 `git diff --check` 通过。新增覆盖首次扫码等待启动、手动配对并发保护、刷新自动恢复、启动前 options、设备撤销、临时离线保留记忆、访问链接配对、页面恢复、存储不可用以及串流重连重新认证。
 - `:common:testDebugUnitTest`：101 项通过，0 失败 / 错误 / 跳过。真实 TCP / WebSocket 覆盖服务重启后恢复、同源校验、错误密钥拒绝、配对码限流、设备移除断开及旧凭据失效、全部移除；持久存储测试覆盖仅保存哈希、注册表重建、名称与最近地址更新、容量限制。App 操作测试覆盖设置入口、重命名、单台移除和全部移除。修复共用文本输入框传入错误布局参数引起的崩溃。
 - `:mobile:assembleDebug` 与 `:mobile:lintDebug` 通过；Lint 0 错误、18 项警告。APK 内的 app.js / index.html / style.css 与当前源码逐字节一致。
-- 内置浏览器访问本地合成画面夹具：首次配对并启动、刷新后免输入恢复配对、启动前勾选 Canvas、点击启动及主动断开保留设备记忆均通过。恢复配对页面截图保存在 Git 忽略的 `.local/browser-device-qa/remembered-browser.jpg`。该夹具不是真实 CarPlay 输出。
+- 内置浏览器访问本地合成画面夹具：首次配对并启动、刷新后免输入恢复配对、点击启动及主动断开保留设备记忆均通过。恢复配对页面截图保存在 Git 忽略的 `.local/browser-device-qa/remembered-browser.jpg`。该夹具不是真实 CarPlay 输出。
 - 设备记忆按浏览器访问地址（协议、主机、端口）隔离，切换地址或清理浏览器数据后需重新配对。本轮未安装到设备，未完成车机 / iPhone 端到端实测。
 
 ## CarPlay MediaSession（2026-10-08）
@@ -191,7 +185,7 @@ APK 构建成功，7 项 UI 测试通过，其中新增双方向测试验证图�
 
 - Shared 218 项、Common 113 项测试通过，0 失败 / 错误 / 跳过。覆盖增量更新、异常字段、切歌、封面分片与上限、过期结果隔离、文件与导航消息排序及重传、发送阻塞期间断线、通知及旧回调、焦点、浏览器接管和本机回退。Robolectric shadow 记录 MediaSession API 并关联 MediaController，不能代替真实 Binder、蓝牙或真机验收。
 - 54 项 npm 测试、`npm run check` 和 `git diff --check` 通过。assembleDebug 通过，包含 arm64-v8a、armeabi-v7a 和 x86_64 原生库；Manifest 包含 mediaPlayback 服务类型及权限。
-- 下载缓慢时使用经过 SHA-512 校验的官方 Maven Robolectric SDK 缓存，以及项目固定提交的本地 MbedTLS / libdatachannel 源码，通过 Git 忽略的 `.local/` 中的临时 Gradle 初始化脚本配置。Gradle 临时使用 JDK 21，测试使用 JDK 25。原有 HTTPS 测试在 JDK 21 上未通过 JCE 框架校验，但在 JDK 25 上全部通过；原 Java 25 工具链配置已恢复。
+- 下载缓慢时使用经过 SHA-512 校验的官方 Maven Robolectric SDK 缓存，以及项目固定提交的本地 MbedTLS 源码，通过 Git 忽略的 `.local/` 中的临时 Gradle 初始化脚本配置。Gradle 临时使用 JDK 21，测试使用 JDK 25。原有 HTTPS 测试在 JDK 21 上未通过 JCE 框架校验，但在 JDK 25 上全部通过；原 Java 25 工具链配置已恢复。
 - 0x5003 ElapsedTime 的发送单位及 seek 前后的音频连续性尚未验证。seekTo 返回 UNSUPPORTED，不声明 ACTION_SEEK_TO。回放夹具为合成样本，非真机抓包；完整 seek 交付标准尚未满足。
 - V2547A（API 37）安装返回 `INSTALL_FAILED_ABORTED: User rejected permissions`，未继续重试。启动、有线 / 无线 iPhone、锁屏、A2DP / AVRCP 和浏览器音频端到端验收尚未完成。
 
@@ -339,3 +333,16 @@ SHA-256：
 ```
 
 包名 `moe.feng.wheelplay`，发行签名，此本地产物包含上述 CarPlay 认证资产。
+
+## Tesla 环境功能裁剪（2026-10-19）
+
+在当前目标环境（Tesla 车机浏览器 + 无线 CarPlay + 手动系统热点）中，以下功能块无实际用途，已删除：
+
+- BYD HUD / 仪表导航输出（SOME/IP、AMap 广播及独立调试入口）。
+- Wi-Fi Direct 与 LocalOnlyHotspot 热点后端；连接网络固定为手动系统热点。
+- CH341 / Linux I2C / 远程 MFi 认证后端；MFi 仅保留本地离线认证资源。
+- Android Auto / Car App Library 服务及依赖。
+- OEM 车厂名称与自定义图标、图片裁剪入口。
+- Android 定位上报与“定位来源”设置。
+
+保留浏览器音频/麦克风链路、WebCodecs、JPEG、Tesla VPN/Root 兼容模式和 ACME/DuckDNS 证书功能。

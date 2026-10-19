@@ -352,33 +352,6 @@ class LanWebServerTest {
         } finally { WebSession.stop() }
     }
 
-    @Test fun browserDeclinedWebRtcReachesTheDiagnosticLog() {
-        WebSession.start(org.robolectric.RuntimeEnvironment.getApplication())
-        val seen = java.util.Collections.synchronizedList(mutableListOf<String>())
-        com.shilapi.xcertplay.DiagnosticLogSink.attach { seen += it }
-        try {
-            val generation = WebSession.beginVideo(320, 180)
-            WebSession.publish(generation, byteArrayOf(42))
-            handshake(WebSession.code).use { client ->
-                assertTrue(readHeaders(client).startsWith("HTTP/1.1 101"))
-                assertEquals("audio-route", org.json.JSONObject(frame(client).toString(Charsets.UTF_8)).getString("type"))
-                frame(client)
-                // No RTC session is started here, so the idle counter is 0 and the browser's id 0
-                // matches. That exercises the recording path without a live native transport.
-                // The decline produces no reply, hence the bounded wait.
-                text(client, "{\"type\":\"rtc-fallback\",\"id\":0}")
-                val deadline = System.currentTimeMillis() + 5_000
-                while (seen.none { it.contains("WebRTC declined") } && System.currentTimeMillis() < deadline) {
-                    Thread.sleep(20)
-                }
-            }
-            assertTrue("browser decline must be recorded, saw $seen", seen.any { it.contains("WebRTC declined") })
-        } finally {
-            com.shilapi.xcertplay.DiagnosticLogSink.attach(null)
-            WebSession.stop()
-        }
-    }
-
     @Test fun qrHttpFlowRequiresOriginAndLocalApprovalBeforeWebSocket() {
         val server = LanWebServer(org.robolectric.RuntimeEnvironment.getApplication(), "123456")
         server.start(5000, true)

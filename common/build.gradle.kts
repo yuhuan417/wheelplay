@@ -13,7 +13,7 @@ android {
         minSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
-        externalNativeBuild { cmake { targets += "wheelplay-rtc" } }
+        externalNativeBuild { cmake { targets += "wheelplay-video" } }
     }
 
     ndkVersion = "28.2.13676358"

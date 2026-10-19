@@ -1,7 +1,7 @@
 # 连接拓扑（测试基线）
 
 本文档固定 WheelPlay 的测试拓扑。**后续所有讨论、改动、验证都以此拓扑为基准**；
-不在此拓扑内的场景（USB 有线、默认 Wi-Fi Direct、iPhone 反过来当站点等）只作对照，不当作需求。
+不在此拓扑内的场景（iPhone 反过来当站点等）只作对照，不当作需求。
 
 记录日期：2026-10-14　代码基线：`5c5b080`
 
@@ -43,15 +43,15 @@
 
 ## App 侧配置要求
 
-- 「连接网络」必须选 **「设备热点」**，不要用默认的 Wi-Fi Direct
+- 连接网络固定为 **「设备热点」**；Wi-Fi Direct / LocalOnlyHotspot 后端已删除
 - 名称 / 密码填 **M 的**，必须与系统里那个信号桥一致
 - iPhone 必须先在系统蓝牙里配对好（App 不扫描、不发起配对）
 
-### 为什么不能用默认的 Wi-Fi Direct
+### 为什么固定使用系统热点
 
 Tesla 兼容模式的 Root 路由只认**系统热点**——它监听 `TETHER_STATE_CHANGED` 的
-`tetherArray`，且明确「不根据 wlan 名称猜测热点」。Wi-Fi Direct 建出来的是 P2P group，
-不是系统热点。要让 CarPlay 与车机浏览器共存，两者必须共用同一个系统热点。
+`tetherArray`，且明确「不根据 wlan 名称猜测热点」。要让 CarPlay 与车机浏览器共存，
+两者必须共用同一个系统热点，因此代码只保留手动热点后端。
 
 ## 承载地址是怎么选出来的
 
@@ -61,21 +61,28 @@ Tesla 兼容模式的 Root 路由只认**系统热点**——它监听 `TETHER_S
 - 在剩下的接口里按名打分：`ap*` / `*softap*` 100 分，`p2p*` 80 分，`wlan*` 70 分；192.x 地址再 +30
 - 因此选中 M 的 AP 接口，拿到的就是发给 iPhone 的那个 192 地址
 
-## 已做的本地改动（未提交）
+## 电源恢复顺序
 
-| 文件 | 改动 |
-|---|---|
-| `shared/.../orchestration/CarPlayController.kt:1571` | 「系统热点没开」由**抛异常**降级为**只写一行 debug 日志**，不再阻断 |
-| `common/.../DiPlayActivity.kt` | 删掉 `connect()` 里的 `carHotspotOff()` 拦截与弹窗；删掉服务页的「热点尚未开启」警告横幅 |
+断电待机后恢复供电时，必须先让安卓的 STA 连上 Wi-Fi 上行（A），再启动 M 的 SoftAP。
+若先开热点，Tesla 和 iPhone 会在连接 M 后发现没有外网而认为热点不可用。
+`RootRadioPower.wakeFromStandby()` 现在分两阶段执行：
 
-凭据本来就是配置驱动（`WirelessHotspotInfo(ssid = expectedSsid, passphrase = passphrase)`），
-App **不会**从系统回读密码覆盖你填的那份。
+1. 启用 Wi-Fi，并轮询 `WifiUplink.isReady()`（Wi-Fi 传输 + INTERNET 能力，或已关联 SSID）；
+2. 上行就绪后才启动系统热点。
 
-## 未决问题
+`CarPlayController` 在建立蓝牙/iAP2 前也会做一次同样的上行等待，避免手动连接时
+iPhone 被过早要求加入没有外网的热点。
 
-1. **iPhone 开着热点 A 时，能否同时作为客户端加入 M。** 这是 iOS 侧行为，代码里看不出来。
-   若不能：CarPlay 建立时 A 必须关闭 → 安卓失去上网 → M 的上游（信号桥）随之断开 →
-   车机断网。但 CarPlay 本身不需要外网，M 上的 AirPlay 理论上仍可运行。
+## iPhone 热点 A 的冲突（已确认）
+
+实测：iPhone 保持个人热点 A 时，CarPlay 控制通道可能已建立（页面显示 connected），
+但视频流不会走 M；在 iPhone 上关闭 Wi-Fi、关闭个人热点并手动加入 M 后，视频立即出现，
+且不需要在 App 里重新点击连接。
+
+这说明 iOS 不能在作为热点 AP 的同时稳定地作为 M 的客户端，属于 iOS 侧限制。
+应用目前会在 AirPlay 会话建立后 10 秒仍无视频时请求一次关键帧，并在页面上提示
+关闭 iPhone 个人热点、手动加入 M。若要同时保留外网和自动 CarPlay，需为安卓提供
+不依赖 iPhone 个人热点的上行网络（例如车机热点、另一台手机或蜂窝网络）。
 
 2. **改后仍可能拦住流程的两道闸**（报错原文，便于对照）：
    - `Timed out after 60000ms waiting for the manual hotspot: local hotspot interface was not found`

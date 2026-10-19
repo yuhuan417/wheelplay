@@ -36,12 +36,10 @@ class TeslaVpnLifecycleTest {
             if (!consent) throw IOException("VPN 未获授权")
             return allocate(address)
         }
-        override fun establishTunnel(linkLocal: String) = allocate(linkLocal)
         override fun duplicateTeslaTunnel(fd: ParcelFileDescriptor): ParcelFileDescriptor {
             if (failDup) throw IOException("dup failed")
             return super.duplicateTeslaTunnel(fd).also(duplicates::add)
         }
-        fun wire(): ParcelFileDescriptor = activateWiredTunnel("fe80::1")
     }
 
     private lateinit var controller: ServiceController<TestService>
@@ -71,53 +69,6 @@ class TeslaVpnLifecycleTest {
         service.duplicates.forEach(::assertOpen)
     }
 
-    @Test fun wiredTunnelIsLastAndDetachingRestoresPlaceholderWithoutReplacingAnchor() {
-        service.setTeslaAddress(address)
-        val anchor = service.allocations[0].second
-        val oldPlaceholder = service.allocations[1].second
-        val wired = service.wire()
-        assertEquals(listOf(address, placeholder, "fe80::1"), service.allocations.map { it.first })
-        assertClosed(oldPlaceholder)
-        repeat(3) { assertEquals(address, service.setTeslaAddress(address).address) }
-        assertEquals(3, service.allocations.size)
-        service.detach()
-        assertClosed(wired)
-        assertOpen(anchor)
-        assertOpen(service.duplicates.single())
-        assertEquals(placeholder, service.allocations.last().first)
-        assertEquals(address, service.teslaVpnStatus.address)
-    }
-
-    @Test fun enableAndAddressChangesWaitForWiredDisconnect() {
-        val wired = service.wire()
-        assertNull(service.setTeslaAddress(address).address)
-        assertTrue(service.teslaVpnStatus.error!!.contains("断开"))
-        assertEquals(listOf("fe80::1"), service.allocations.map { it.first })
-        assertOpen(wired)
-        service.detach()
-        assertEquals(address, service.teslaVpnStatus.address)
-        val wiredAgain = service.wire()
-        val count = service.allocations.size
-        assertNull(service.setTeslaAddress("6.6.6.7").address)
-        assertEquals(count, service.allocations.size)
-        assertOpen(wiredAgain)
-        service.detach()
-        assertEquals("6.6.6.7", service.teslaVpnStatus.address)
-        assertEquals(listOf("6.6.6.7", placeholder), service.allocations.takeLast(2).map { it.first })
-    }
-
-    @Test fun disablingTeslaClosesAllItsFdsAndKeepsWiredCarPlayRunning() {
-        service.setTeslaAddress(address)
-        val owned = service.allocations.map { it.second } + service.duplicates
-        val wired = service.wire()
-        assertNull(service.setTeslaAddress(null).address)
-        owned.forEach(::assertClosed)
-        assertOpen(wired)
-        val count = service.allocations.size
-        service.detach()
-        assertEquals(count, service.allocations.size)
-    }
-
     @Test fun partialEstablishmentFailureClosesOriginalAndDuplicateAndDoesNotAutomaticallyRetry() {
         service.failAddress = placeholder
         assertNull(service.setTeslaAddress(address).address)
@@ -134,38 +85,6 @@ class TeslaVpnLifecycleTest {
         assertNull(service.setTeslaAddress(address).address)
         assertEquals(listOf(address), service.allocations.map { it.first })
         assertClosed(service.allocations.single().second)
-    }
-
-    @Test fun failedWiredEstablishmentKeepsTheExistingTeslaPlaceholderAndAnchor() {
-        service.setTeslaAddress(address)
-        service.failAddress = "fe80::1"
-        assertTrue(runCatching { service.wire() }.exceptionOrNull() is IOException)
-        service.detach()
-        assertEquals(2, service.allocations.size)
-        service.allocations.forEach { assertOpen(it.second) }
-        assertEquals(address, service.teslaVpnStatus.address)
-    }
-
-    @Test fun placeholderRestoreFailureWithdrawsEntryAndClosesAnchorReferences() {
-        service.setTeslaAddress(address)
-        service.wire()
-        service.failAddress = placeholder
-        service.detach()
-        assertNull(service.teslaVpnStatus.address)
-        assertEquals("allocation failed", service.teslaVpnStatus.error)
-        service.allocations.forEach { assertClosed(it.second) }
-        service.duplicates.forEach(::assertClosed)
-    }
-
-    @Test fun addressDisappearingWithdrawsEntryWithoutDeactivatingWiredTunnel() {
-        service.setTeslaAddress(address)
-        val wired = service.wire()
-        service.addressPresent = false
-        assertNull(service.setTeslaAddress(address).address)
-        assertTrue(service.teslaVpnStatus.error!!.contains("系统未保留"))
-        assertOpen(wired)
-        assertClosed(service.allocations.first().second)
-        service.duplicates.forEach(::assertClosed)
     }
 
     @Test fun revokeClosesAllReferencesAndNeverReestablishesUntilExplicitAuthorizedRetry() {
@@ -186,7 +105,6 @@ class TeslaVpnLifecycleTest {
 
     @Test fun destroyClosesAllReferencesAndDoesNotRestorePlaceholder() {
         service.setTeslaAddress(address)
-        service.wire()
         val count = service.allocations.size
         controller.destroy()
         assertEquals(count, service.allocations.size)

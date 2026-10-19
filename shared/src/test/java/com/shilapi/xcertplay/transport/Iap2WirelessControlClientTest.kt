@@ -86,25 +86,6 @@ class Iap2WirelessControlClientTest {
         assertTrue(Iap2WirelessMessages.wirelessCarPlayAvailability(frame))
     }
 
-    @Test
-    fun wiredIdentificationKeepsCarPlayStartSessionDeclaration() {
-        val config = Iap2IdentificationConfig(
-            name = "wired",
-            modelIdentifier = "wired",
-            manufacturer = "test",
-            serialNumber = "1",
-            firmwareVersion = "1.0",
-            hardwareVersion = "1.0",
-            carPlayUsbInterfaceNumber = 4,
-        )
-        val parameters = parameters(
-            Iap2IdentificationClient.identificationInformation(config).payload,
-        )
-
-        assertTrue(0x4301 in u16Values(parameters.single { it.id == 6 }.payload))
-        assertTrue(0x4300 in u16Values(parameters.single { it.id == 7 }.payload))
-    }
-
     private fun endpoint(): Iap2WirelessCarPlayEndpoint = Iap2WirelessCarPlayEndpoint(
         ssid = "LIVI",
         passphrase = "secret123",

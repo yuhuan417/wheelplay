@@ -24,7 +24,6 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
-import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -46,7 +45,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.widget.doAfterTextChanged
 import com.shilapi.xcertplay.host.R
-import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -126,15 +124,14 @@ class DiPlayActivity : AppCompatActivity() {
     private var connectButton: com.google.android.material.button.MaterialButton? = null
     private var disconnectButton: Button? = null
     private var lastRunning: Boolean? = null
-    private var pendingWireless = false
+    private var pendingConnect = false
     private var initialLaunch = true
-    private var notificationTransport = true
     private var exportInProgress = false
     private var exportButton: Button? = null
     private var audioOutputStatus: TextView? = null
     private var microphoneSourceStatus: TextView? = null
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        connect(notificationTransport)
+        connect()
     }
     private val tick = object : Runnable {
         override fun run() { refreshStatus(); refreshService(); refreshRootSettings(); refreshAudioRoutes(); handler.postDelayed(this, 1000) }
@@ -144,19 +141,6 @@ class DiPlayActivity : AppCompatActivity() {
     }
     private val export = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) exportDiagnostics(uri)
-    }
-
-    private val oemImagePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) runCatching {
-            oemImageCrop.launch(Intent(this, ImageCropActivity::class.java)
-                .setData(uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
-        }.onFailure { toast("无法打开图标裁剪界面，请重试") }
-    }
-    private val oemImageCrop = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == RESULT_OK) {
-            render()
-            toast("车厂图标已保存，下次连接 iPhone 生效")
-        }
     }
 
     private val authenticationImport by lazy {
@@ -220,7 +204,6 @@ class DiPlayActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (TeslaHttpCompatibility.config(this).let { it.enabled && it.mode == TeslaHttpMode.ROOT }) RootAccess.checkOnStartup()
-        com.shilapi.xcertplay.hud.BydNavigationOutputs.onAppOpened(applicationContext)
         ServerWindow.showSystemBars(window)
         refreshAuthentication()
         selectedPrivateKey = savedInstanceState?.getString("selectedPrivateKey")?.let(Uri::parse)
@@ -230,7 +213,6 @@ class DiPlayActivity : AppCompatActivity() {
         createShell()
         startWebServiceIfReady()
         com.shilapi.xcertplay.domain.OwnDomainManager.ensureStarted(this)
-        handleWirelessRecovery()
         authenticationImport.state.observe(this) { state ->
             refreshAuthentication()
             render(); refreshService()
@@ -263,7 +245,7 @@ class DiPlayActivity : AppCompatActivity() {
         WebSession.setPhoneConnectHandler {
             if (setupError != null) setupError!!
             else {
-                connect(AirPlayPersistence.loadWirelessEnabled(this))
+                connect()
                 "已请求连接 iPhone；如有提示，请在 Android 上完成设备选择或授权，并在 iPhone 上允许 CarPlay"
             }
         }
@@ -276,7 +258,7 @@ class DiPlayActivity : AppCompatActivity() {
                 !CarPlayBackgroundSession.hasSession() &&
                 !CarPlayBackgroundSession.isUnpluggedOnBattery(this) &&
                 DiPlayPreferences.autoConnect(this) && intent.getStringExtra("page") == null) {
-                handler.post { connect(AirPlayPersistence.loadWirelessEnabled(this)) }
+                handler.post { connect() }
             }
         }
     }
@@ -284,7 +266,7 @@ class DiPlayActivity : AppCompatActivity() {
     override fun onDestroy() { pendingPemCertificate?.fill(0); pendingPemCertificate = null; super.onDestroy() }
 
     private fun normalizedPage(value: String) = when (value) {
-        "home", "wireless-recovery" -> "phone"
+        "home" -> "phone"
         "about" -> "settings"
         "phone", "settings" -> value
         else -> "service"
@@ -294,7 +276,6 @@ class DiPlayActivity : AppCompatActivity() {
         val target = normalizedPage(destination)
         shell.select(target)
         page = target
-        if (destination == "wireless-recovery") confirmWirelessReset()
     }
 
     private fun createShell() {
@@ -364,7 +345,7 @@ class DiPlayActivity : AppCompatActivity() {
             webStage = label("等待连接 iPhone", 16, TEXT)
             body.addView(webStage)
             sessionConnectButton = button("连接", false, R.drawable.ic_server_phone) {
-                if (!CarPlayBackgroundSession.hasSession() || CarPlayBackgroundSession.standby) connect(true)
+                if (!CarPlayBackgroundSession.hasSession() || CarPlayBackgroundSession.standby) connect()
             }.apply { visibility = View.GONE }
             body.addView(sessionConnectButton, ui.secondaryButtonLayout(12))
             body.addView(button("管理 iPhone 连接", false) { navigate("phone") }, ui.secondaryButtonLayout(16))
@@ -439,7 +420,7 @@ class DiPlayActivity : AppCompatActivity() {
         ui.card(content, "无线连接", R.drawable.ic_server_wifi) { body ->
             body.addView(label("先将 iPhone 与这台 Android 设备完成蓝牙配对，并保持双方蓝牙和 Wi-Fi 开启。", 15, MUTED))
             body.addView(ui.preference("iPhone", selectedPhoneName()) { choosePhone() }, matchButton())
-            connectButton = button("连接 iPhone", true, R.drawable.ic_server_phone) { connect(true) }
+            connectButton = button("连接 iPhone", true, R.drawable.ic_server_phone) { connect() }
             body.addView(connectButton, matchButton(12))
             disconnectButton = button("断开 iPhone", false) {
                 disconnectButton?.isEnabled = false
@@ -450,10 +431,6 @@ class DiPlayActivity : AppCompatActivity() {
                 } }
             }.apply { visibility = View.GONE }
             body.addView(disconnectButton, ui.secondaryButtonLayout(12))
-        }
-        ui.card(content, "USB 连接", R.drawable.ic_server_usb) { body ->
-            body.addView(label("使用数据线连接 iPhone 与此设备，并在 iPhone 上允许 CarPlay。", 15, MUTED))
-            body.addView(button("通过 USB 连接", false) { connect(false) }, ui.secondaryButtonLayout(16))
         }
         setupError?.let { content.addView(label(it, 16, WARNING)) }
     }
@@ -495,11 +472,6 @@ class DiPlayActivity : AppCompatActivity() {
             card.addView(ui.preference("iPhone", selectedPhoneName()) { choosePhone() }, matchButton())
         }
         section(content, "无线连接") { card -> wirelessLinkControls(card) }
-        section(content, "OEM 车厂名称与图标") { card -> oemControls(card) }
-        section(content, "定位") { card ->
-            locationSourceControl(card)
-            card.addView(label("默认由 iPhone 和导航 App 定位。选择 Android 后，在 iPhone 请求时提供这台设备的定位数据，需要 Android 精确定位权限。下次连接 iPhone 生效。", 14, MUTED))
-        }
         section(content, "浏览器设备") { card ->
             card.addView(label("配对后的浏览器会被记住，下次打开时自动恢复配对；选择启动选项后，点击网页上的「启动显示」。", 16, MUTED))
             card.addView(ui.preference("连接过的设备", "查看、重命名或移除浏览器") { showBrowserDevices() })
@@ -566,8 +538,8 @@ class DiPlayActivity : AppCompatActivity() {
                             .onSuccess { render(); refreshService() }.onFailure { toast(it.message ?: "访问 IP 无效") }
                     }
                 }.apply { isEnabled = !webBusy && !awaitingTeslaVpnConsent })
-                card.addView(label("请让车机连接此手机的系统热点，使用 http://${config.vpnAddress}:${WebListenSettings.httpPort(this)}。此方案可能不兼容部分手机或车机，系统更新后可能失效。有线 CarPlay 已连接时，启用或修改 IP 将等待断开后生效。", 14, MUTED))
-                card.addView(label("直接使用 Web 监听端口，无低位端口映射。可选 HTTPS 仍需车机信任证书；WebRTC 视频需单独验证。", 14, MUTED))
+                card.addView(label("请让车机连接此手机的系统热点，使用 http://${config.vpnAddress}:${WebListenSettings.httpPort(this)}。此方案可能不兼容部分手机或车机，系统更新后可能失效。", 14, MUTED))
+                card.addView(label("直接使用 Web 监听端口，无低位端口映射。可选 HTTPS 仍需车机信任证书。", 14, MUTED))
                 card.addView(button("授权或重试 VPN", false) { setTeslaHttpEnabled(true) }
                     .apply { isEnabled = !webBusy && !awaitingTeslaVpnConsent }, ui.secondaryButtonLayout(12))
                 card.addView(button("打开热点设置", false) { openCarWifiSettings() }, ui.secondaryButtonLayout(12))
@@ -655,25 +627,14 @@ class DiPlayActivity : AppCompatActivity() {
                 technologies.indexOf(AirPlayPersistence.loadStreamTechnology(this))) {
                 AirPlayPersistence.saveStreamTechnology(this, technologies[it])
             }
-            card.addView(label("WebRTC 支持 H.264 / HEVC 直通，浏览器不支持时自动回退 JPEG（约 15 fps）。追求 60 fps 请将协商帧率设为 60；实际帧率以网页显示为准。", 14, MUTED))
-            val recoveryPolicies = com.shilapi.xcertplay.web.RtcRecoveryPolicy.entries
-            choice(card, "WebRTC 卡顿容忍时间", recoveryPolicies.map { it.label },
-                recoveryPolicies.indexOf(AirPlayPersistence.loadRtcRecoveryPolicy(this))) {
-                AirPlayPersistence.saveRtcRecoveryPolicy(this, recoveryPolicies[it])
-            }
+            card.addView(label("JPEG 兼容性最好。WebCodecs 通过 HTTPS 页面直传 H.264 / HEVC 压缩流（Tesla Chrome 113+），追求 60 fps 请将协商帧率设为 60；实际帧率以网页显示为准。", 14, MUTED))
             card.addView(label("短暂断流时保留最后一帧并等待恢复，持续异常超过所选时间才回退 JPEG。不增加视频缓冲；不支持的编码或彻底失败的连接仍立即回退。下次浏览器连接生效。", 14, MUTED))
-            toggle(card, "允许 iPhone 使用 HEVC", "下次连接生效。需要浏览器支持 HEVC / WebRTC，否则回退 JPEG；关闭时使用 H.264。", AirPlayPersistence.loadHevcEnabled(this)) { AirPlayPersistence.saveHevcEnabled(this, it) }
+            toggle(card, "允许 iPhone 使用 HEVC", "下次连接生效。JPEG 模式由 Android 解码；WebCodecs 模式需要浏览器支持 HEVC 解码。关闭时使用 H.264。", AirPlayPersistence.loadHevcEnabled(this)) { AirPlayPersistence.saveHevcEnabled(this, it) }
             toggle(card, "右舵布局", "将 CarPlay 控件移到右侧。", AirPlayPersistence.loadRightHandDrive(this)) { AirPlayPersistence.saveRightHandDrive(this, it) }
 
         }
-        val simulatedManufacturerName = AirPlayPersistence.loadSimulatedManufacturerName(this)
-        if (com.shilapi.xcertplay.hud.BydOutputSettings.available(this)) section(content, "$simulatedManufacturerName 导航输出") { card ->
-            toggle(card, "抬头显示与仪表导航",
-                "在兼容的 $simulatedManufacturerName 设备上显示导航箭头、距离与路名，支持情况取决于车型。",
-                com.shilapi.xcertplay.hud.BydOutputSettings.enabled(this)) { com.shilapi.xcertplay.hud.BydOutputSettings.setEnabled(this, it) }
-        }
         section(content, "权限与连接帮助") { card ->
-            card.addView(label("附近设备权限用于连接 iPhone，麦克风用于 Siri 和通话。旧版 Android 的无线连接还需要定位权限，USB 模式可能请求本地 VPN 授权。", 16, MUTED))
+            card.addView(label("附近设备权限用于连接 iPhone，麦克风用于 Siri 和通话。旧版 Android 的无线连接还需要定位权限。", 16, MUTED))
             card.addView(ui.preference("浏览器 HTTPS 证书", "查看本设备证书指纹") {
                 val fingerprint = WebSession.tls?.fingerprint
                 MaterialAlertDialogBuilder(this)
@@ -708,76 +669,6 @@ class DiPlayActivity : AppCompatActivity() {
         }
     }
 
-    private fun oemControls(card: LinearLayout) {
-        val name = AirPlayPersistence.loadSimulatedManufacturerName(this)
-        val custom = AirPlayPersistence.loadCustomAirPlayIconFile(this)?.let {
-            BitmapFactory.decodeFile(it.absolutePath)
-        }
-        val preview = ImageView(this).apply {
-            contentDescription = "CarPlay 车厂图标预览"
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setImageBitmap(custom ?: BitmapFactory.decodeResource(resources, R.raw.ic_car_home))
-        }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(preview, LinearLayout.LayoutParams(dp(72), dp(72)))
-            addView(column().apply {
-                addView(label(name, 20, TEXT, true))
-                addView(label(if (custom != null) "自定义图标" else "默认 NIO 图标", 14, MUTED))
-            }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(16) })
-        }
-        card.addView(row)
-        card.addView(label("显示在 CarPlay 应用列表的「返回车机」入口。名称与图标可分别修改，下次连接 iPhone 生效。", 14, MUTED).apply {
-            setPadding(0, dp(12), 0, dp(8))
-        })
-        card.addView(ui.preference("车厂名称", name) {
-            textInput("车厂名称（留空恢复 NIO）", name, false) {
-                AirPlayPersistence.saveSimulatedManufacturerName(this, it)
-                render()
-                toast("车厂名称已保存，下次连接 iPhone 生效")
-            }
-        })
-        card.addView(button("选择车厂图标", false) {
-            runCatching { oemImagePicker.launch("image/*") }
-                .onFailure { toast("此设备没有可用的图片选择器，请先安装文件管理器后重试") }
-        }, ui.secondaryButtonLayout(12))
-        card.addView(label("选择图片后可拖动、缩放并裁剪为正方形。图标保存在本机，原图片删除后仍可使用。", 14, MUTED))
-        card.addView(button("恢复默认图标", false) {
-            runCatching { AirPlayPersistence.clearCustomAirPlayIcon(this) }
-                .onSuccess { render(); toast("已恢复默认图标，下次连接 iPhone 生效") }
-                .onFailure { toast("无法恢复默认图标，请重试") }
-        }.apply { isEnabled = AirPlayPersistence.loadCustomAirPlayIconFile(this@DiPlayActivity) != null }, ui.secondaryButtonLayout(12))
-        card.addView(button("恢复默认名称与图标", false) {
-            MaterialAlertDialogBuilder(this).setTitle("恢复默认车厂设置？")
-                .setMessage("车厂名称和图标将恢复为 NIO。下次连接 iPhone 生效。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("恢复默认") { _, _ ->
-                    runCatching {
-                        AirPlayPersistence.clearCustomAirPlayIcon(this)
-                        AirPlayPersistence.saveSimulatedManufacturerName(this, AirPlayPersistence.DEFAULT_SIMULATED_MANUFACTURER_NAME)
-                    }.onSuccess { render(); toast("已恢复默认车厂设置") }
-                        .onFailure { toast("无法恢复默认车厂设置，请重试") }
-                }.show()
-        }, ui.secondaryButtonLayout(12))
-    }
-
-    private fun locationSourceControl(card: LinearLayout) {
-        val options = listOf("iPhone 自身定位（默认）", "Android 设备定位")
-        val control = ui.preference("定位来源", options[if (AirPlayPersistence.loadLocationReportingEnabled(this)) 1 else 0]) {}
-        control.setOnClickListener {
-            var selected = if (AirPlayPersistence.loadLocationReportingEnabled(this)) 1 else 0
-            MaterialAlertDialogBuilder(this).setTitle("定位来源")
-                .setSingleChoiceItems(options.toTypedArray(), selected) { _, index -> selected = index }
-                .setPositiveButton("保存") { _, _ ->
-                    AirPlayPersistence.saveLocationReportingEnabled(this, selected == 1)
-                    control.setValue(options[selected])
-                    toast("定位来源已保存，下次连接 iPhone 生效")
-                }.setNegativeButton("取消", null).show()
-        }
-        card.addView(control, matchButton())
-    }
-
     private fun experienceChoice(card: LinearLayout, title: String, options: List<String>, initial: Int,
         reconnect: Boolean = false, save: (Int) -> Unit) {
         var selection = initial
@@ -799,7 +690,7 @@ class DiPlayActivity : AppCompatActivity() {
     }
 
     private fun reconnectForPreference() {
-        if (CarPlayBackgroundSession.hasSession()) connect(AirPlayPersistence.loadWirelessEnabled(this))
+        if (CarPlayBackgroundSession.hasSession()) connect()
         else toast("已保存，下次连接 iPhone 生效")
     }
 
@@ -1114,30 +1005,6 @@ class DiPlayActivity : AppCompatActivity() {
     // Wi-Fi Direct is the default link. The car's own hotspot is an alternative when Wi-Fi Direct is unstable.
     // The runtime config rejects manual mode without valid credentials, so it is only saved together with them.
     private fun wirelessLinkControls(parent: LinearLayout) {
-        val carHotspot = AirPlayPersistence.loadWirelessHotspotMode(this) == WirelessHotspotMode.MANUAL
-        val options = arrayOf("Wi-Fi Direct · 默认", "设备热点")
-        val control = ui.preference("连接网络", if (carHotspot) "设备热点" else "Wi-Fi Direct") {}
-        control.setOnClickListener {
-            var selection = if (carHotspot) 1 else 0
-            MaterialAlertDialogBuilder(this).setTitle("连接网络")
-                .setSingleChoiceItems(options, selection) { _, index -> selection = index }
-                .setPositiveButton(if (CarPlayBackgroundSession.hasSession()) "应用并重新连接" else "保存") { _, _ ->
-                    when {
-                        (selection == 1) == carHotspot -> Unit
-                        selection == 0 -> applyWirelessLink(WirelessHotspotMode.WIFI_P2P)
-                        hotspotError(storedSsid(), storedPassword()) == null -> applyWirelessLink(WirelessHotspotMode.MANUAL)
-                        else -> askHotspotCredentials { ssid, password ->
-                            saveHotspotCredentials(ssid, password)
-                            applyWirelessLink(WirelessHotspotMode.MANUAL)
-                        }
-                    }
-                }.setNegativeButton("取消", null).show()
-        }
-        parent.addView(control, matchButton(0))
-        if (!carHotspot) {
-            parent.addView(label("由此设备创建 Wi-Fi Direct 网络供 iPhone 连接。", 14, MUTED))
-            return
-        }
         val ssid = storedSsid()
         val password = storedPassword()
         parent.addView(ui.preference("热点名称", ssid) {
@@ -1154,7 +1021,7 @@ class DiPlayActivity : AppCompatActivity() {
                 render()
             }
         }, matchButton(0))
-        parent.addView(label("先在系统设置中开启热点，在此填写相同名称与密码。iPhone 会连接该网络，修改在下次连接生效。", 14, MUTED).apply {
+        parent.addView(label("保持系统热点开启，并在此填写相同的名称与密码。iPhone 会连接该网络，修改在下次连接生效。", 14, MUTED).apply {
             setPadding(0, dp(8), 0, 0)
         })
     }
@@ -1173,21 +1040,6 @@ class DiPlayActivity : AppCompatActivity() {
             com.shilapi.xcertplay.orchestration.ManualHotspotValidation.securityFor(password))
         AirPlayPersistence.saveManualHotspotBand(this, com.shilapi.xcertplay.orchestration.ManualHotspotBand.AUTO)
         AirPlayPersistence.saveManualHotspotChannel(this, 0)
-    }
-
-    private fun askHotspotCredentials(done: (String, String) -> Unit) {
-        textInput("热点名称", storedSsid(), secret = false, preserveWhitespace = true) { ssid ->
-            textInput("热点密码", storedPassword(), secret = true) { password ->
-                val error = hotspotError(ssid, password)
-                if (error != null) toast(error) else done(ssid, password)
-            }
-        }
-    }
-
-    private fun applyWirelessLink(mode: WirelessHotspotMode) {
-        AirPlayPersistence.saveWirelessHotspotMode(this, mode)
-        render()
-        if (CarPlayBackgroundSession.hasSession()) connect(true)
     }
 
     private fun showBrowserDevices() {
@@ -1310,25 +1162,23 @@ class DiPlayActivity : AppCompatActivity() {
         })
     }
 
-    private fun connect(wireless: Boolean) {
+    private fun connect() {
         refreshAuthentication()
         if (setupError != null) { toast(setupError!!); return }
-        if (wireless && DiPlayPreferences.phoneAddress(this) == null) {
-            pendingWireless = true; choosePhone(); return
+        if (DiPlayPreferences.phoneAddress(this) == null) {
+            pendingConnect = true; choosePhone(); return
         }
         val preferences = getSharedPreferences("diplay", MODE_PRIVATE)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !preferences.getBoolean("notification_asked", false)) {
             preferences.edit().putBoolean("notification_asked", true).apply()
-            notificationTransport = wireless
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             return
         }
         val open = {
-            AirPlayPersistence.saveWirelessEnabled(this, wireless)
             startWebServiceIfReady()
             openProjection()
         }
-        if (CarPlayBackgroundSession.standby && wireless == AirPlayPersistence.loadWirelessEnabled(this)) {
+        if (CarPlayBackgroundSession.standby) {
             startWebServiceIfReady()
             if (CarPlayBackgroundSession.wake("手动连接")) {
                 navigate("service")
@@ -1370,66 +1220,17 @@ class DiPlayActivity : AppCompatActivity() {
             }.toTypedArray()) { _, index ->
                 val device = devices[index]
                 DiPlayPreferences.savePhone(this, device.address, device.name ?: "iPhone")
-                val start = pendingWireless; pendingWireless = false
+                val start = pendingConnect; pendingConnect = false
                 render()
-                if (start) connect(true)
+                if (start) connect()
             }.setNeutralButton("配对其他设备") { _, _ -> openSystem(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
-            .setNegativeButton("取消") { _, _ -> pendingWireless = false }.show()
+            .setNegativeButton("取消") { _, _ -> pendingConnect = false }.show()
     }
 
     private fun wirelessHelp() {
         MaterialAlertDialogBuilder(this).setTitle("无线连接帮助")
-            .setMessage("将 iPhone 与此设备完成蓝牙配对，保持 Wi-Fi 开启，并在 iPhone 上允许 CarPlay。请关闭其他投屏应用。\n\n如果之前的连接仍占用网络，可重置 CarPlay Wi-Fi 后重连。此操作不会关闭普通上网 Wi-Fi。")
-            .setPositiveButton("知道了", null)
-            .setNeutralButton("重置 CarPlay Wi-Fi") { _, _ ->
-                confirmWirelessReset()
-            }.show()
-    }
-
-    private fun handleWirelessRecovery() {
-        if (intent.getStringExtra("page") != "wireless-recovery") return
-        intent.removeExtra("page")
-        navigate("phone")
-        confirmWirelessReset()
-    }
-
-    private fun confirmWirelessReset() {
-        MaterialAlertDialogBuilder(this).setTitle("重置 CarPlay Wi-Fi？")
-            .setMessage("这会结束当前 Wi-Fi Direct 连接，包括重新安装前遗留的连接。请先关闭其他投屏应用，普通上网 Wi-Fi 不受影响。")
-            .setPositiveButton("重置并连接") { _, _ ->
-                CarPlayBackgroundSession.stop { runOnUiThread { resetWirelessGroup() } }
-            }.setNegativeButton("取消", null).show()
-    }
-
-    private fun resetWirelessGroup() {
-        val manager = getSystemService(android.net.wifi.p2p.WifiP2pManager::class.java)
-        if (manager == null) { toast("此设备不支持 Wi-Fi Direct。"); return }
-        val channel = manager.initialize(this, mainLooper, null)
-        try {
-            manager.requestGroupInfo(channel) { group ->
-                if (group == null) { channel.close(); connect(true); return@requestGroupInfo }
-                manager.removeGroup(channel, object : android.net.wifi.p2p.WifiP2pManager.ActionListener {
-                    override fun onSuccess() {
-                        val deadline = android.os.SystemClock.elapsedRealtime() + 4000
-                        fun waitUntilRemoved() {
-                            manager.requestGroupInfo(channel) { remaining ->
-                                when {
-                                    remaining == null -> { channel.close(); if (!isFinishing && !isDestroyed) connect(true) }
-                                    android.os.SystemClock.elapsedRealtime() >= deadline -> {
-                                        channel.close(); toast("Wi-Fi Direct 仍被占用，请关闭其他投屏应用后重试。")
-                                    }
-                                    else -> handler.postDelayed({ waitUntilRemoved() }, 200)
-                                }
-                            }
-                        }
-                        waitUntilRemoved()
-                    }
-                    override fun onFailure(reason: Int) { channel.close(); toast("无法重置 Wi-Fi Direct，请关闭其他投屏应用后重试。") }
-                })
-            }
-        } catch (_: SecurityException) {
-            channel.close(); permissionHelp("无线连接权限", "请先允许附近设备权限；旧版 Android 还需定位权限。")
-        }
+            .setMessage("将 iPhone 与此设备完成蓝牙配对，保持 Wi-Fi 与系统热点开启，并在 iPhone 上允许 CarPlay。请关闭其他投屏应用。")
+            .setPositiveButton("知道了", null).show()
     }
 
     private fun refreshStatus() {
@@ -1477,13 +1278,15 @@ class DiPlayActivity : AppCompatActivity() {
                     appendLine("WheelPlay ${version()} · private beta diagnostic report")
                     appendLine("Android ${Build.VERSION.RELEASE} / API ${Build.VERSION.SDK_INT}")
                     appendLine("Head unit: ${Build.MANUFACTURER} ${Build.MODEL}")
-                    appendLine("Connection: ${if (AirPlayPersistence.loadWirelessEnabled(appContext)) "wireless" else "USB"}")
+                    appendLine("Connection: wireless CarPlay")
                     appendLine("Authentication: local experimental beta identity; no remote fallback")
                     appendLine("Saved video preference (may differ from active session): ${if (AirPlayPersistence.loadHevcEnabled(appContext)) "HEVC" else "H.264"}; ${AirPlayPersistence.loadFps(appContext)} fps")
                     appendLine("CarPlay size: ${com.shilapi.xcertplay.airplay.CarPlaySize.fromWidthMillimeters(AirPlayPersistence.loadWidthPhysicalMm(appContext)).label}")
                     appendLine("Saved resolution preference (may differ from active session): ${AirPlayPersistence.loadDisplayScaleTenths(appContext) * 10}%")
                     appendLine("Tesla compatibility: enabled=${TeslaHttpCompatibility.config(appContext).enabled}; mode=${TeslaHttpCompatibility.config(appContext).mode}; addressConfigured=${TeslaHttpCompatibility.status.address != null}; downstreams=${TeslaHttpCompatibility.status.downstreams.joinToString()}")
                     TeslaHttpCompatibility.status.error?.let { appendLine("Tesla compatibility status: $it") }
+                    val ownDomain = com.shilapi.xcertplay.domain.OwnDomainManager.status
+                    appendLine("Own domain: phase=${ownDomain.phase}; domain=${ownDomain.domain}; address=${ownDomain.address}; certificateUntil=${ownDomain.certificateUntilMillis}; error=${ownDomain.lastError}")
                     appendLine("Session: ${if (CarPlayBackgroundSession.active) "active" else if (CarPlayBackgroundSession.hasSession()) "connecting" else "stopped"}")
                     appendLine("Head-unit board: ${Build.BOARD}; hardware: ${Build.HARDWARE}; build: ${Build.DISPLAY}")
                     appendLine()
@@ -1550,7 +1353,7 @@ class DiPlayActivity : AppCompatActivity() {
                         save(selection)
                         control.setValue(options[selection].substringBefore(" · "))
                         if (CarPlayBackgroundSession.hasSession()) {
-                            connect(AirPlayPersistence.loadWirelessEnabled(this))
+                            connect()
                         }
                     }
                 }.setNegativeButton("取消", null).show()

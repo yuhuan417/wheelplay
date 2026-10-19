@@ -6,7 +6,7 @@
 
 ## 1. 背景与现状管线
 
-当车机浏览器未启用或无法使用 WebRTC 直通时，WheelPlay 通过手机端 OpenGL 离屏渲染抓取 CarPlay 画面并压缩为 JPEG，经同一条配对 WebSocket（`/stream`）推送至车机浏览器。优化前的端到端管线如下：
+当未选择 WebCodecs 模式时，WheelPlay 通过手机端 OpenGL 离屏渲染抓取 CarPlay 画面并压缩为 JPEG，经同一条配对 WebSocket（`/stream`）推送至车机浏览器。优化前的端到端管线如下：
 
 ```text
 [手机端后台]
@@ -81,7 +81,7 @@ WebSocket Binary (ArrayBuffer)
 - 将前端 JPEG 接收改造为**“1 个解码中状态（`jpegDecoding`）+ 最多 1 个待解码槽位（`pendingJpeg`）”**的有限流水线：
   1. 在 `createImageBitmap` 异步主路径下，当第 N 帧**开始进入浏览器后台解码线程**且 `pendingJpeg === null` 时，立即发送 `ack` 允许服务端在网络上并行推送第 N+1 帧；若第 N+1 帧到达时第 N 帧仍在解码，则将第 N+1 帧存入 `pendingJpeg`（此时暂不发送 `ack`，防止服务端无限制堆积）。
   2. 一旦第 N 帧解码完成，若 `pendingJpeg` 非空，立即取出 `pendingJpeg` 启动下一轮解码并发送 `ack`。
-  3. 维护 `jpegGeneration` 代次计数，在断线或切换 WebRTC 时立即 `bitmap.close()` 并丢弃过期异步帧。
+  3. 维护 `jpegGeneration` 代次计数，在断线或切换串流模式时立即 `bitmap.close()` 并丢弃过期异步帧。
 
 ---
 
@@ -225,9 +225,9 @@ WebSocket Binary (ArrayBuffer)
 
 ## 5. 兼容性与验证计划
 
-1. **WebRTC 与 JPEG 模式切换兼容**：
-   - `OffscreenVideoOutput` 的长边 `960` 缩放仅作用于离屏 JPEG 抓图 Pbuffer，不影响 `WebVideoSource` 直通给 WebRTC 的 H.264 码流分辨率，也不影响归一化触控坐标映射。
-   - 当 WebRTC 激活时，`source.jpegNeeded == false` 自动停止后台 JPEG 抓图与编码，前端清理未决 `ImageBitmap` 与 `stagedBitmap` 槽位。
+1. **WebCodecs 与 JPEG 模式切换兼容**：
+   - `OffscreenVideoOutput` 的长边 `960` 缩放仅作用于离屏 JPEG 抓图 Pbuffer，不影响 `WebVideoSource` 转发给 WebCodecs 的 H.264/H.265 码流分辨率，也不影响归一化触控坐标映射。
+   - 当选择 WebCodecs 时，`source.jpegNeeded == false` 自动停止后台 JPEG 抓图与编码，前端清理未决 `ImageBitmap` 与 `stagedBitmap` 槽位。
 2. **自动化测试验证**：
    - 前端：运行 `npm test` 与 `npm run check`，验证 `imageSmoothingEnabled = false`、`requestAnimationFrame` 合批丢弃过期帧、`createImageBitmap` 流水线与 `<img>` 降级路径。
    - 后台：运行 Gradle 单元测试（`FramePublishSchedulerTest`、`WebStreamSenderTest`、`LanWebServerTest` 及新增的 `OffscreenVideoOutputTest`），验证 33ms 节流、ACK 唤醒、`TCP_NODELAY` 及长边 `960` 等比偶数缩放逻辑。

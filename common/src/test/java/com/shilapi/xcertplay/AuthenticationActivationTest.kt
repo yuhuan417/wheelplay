@@ -65,9 +65,9 @@ class AuthenticationActivationTest {
         controller.destroy()
     }
 
-    @Test fun usbLaunchWithoutResourcesRedirectsToSettingsAndClosesHost() {
+    @Test fun hostLaunchWithoutResourcesRedirectsToSettingsAndClosesHost() {
         val controller = Robolectric.buildActivity(CarPlayHostActivity::class.java,
-            Intent("android.hardware.usb.action.USB_DEVICE_ATTACHED")).setup()
+            Intent()).setup()
         val host = controller.get()
         assertTrue(host.isFinishing)
         val destination = shadowOf(host).nextStartedActivity

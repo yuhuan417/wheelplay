@@ -18,7 +18,7 @@ internal class WebStreamSender(
     /** Called when WebCodecs frames were dropped and only a fresh keyframe can resume the stream. */
     private val onVideoBacklog: () -> Unit = {},
 ) : Closeable {
-    enum class Control { STATUS, PHONE_CONNECT, INPUT_UNAVAILABLE, HOST_UI, BUSY, PONG, CLOSE, RTC, WEBCODECS, MIC_CONFIG, MIC_STOP, AUDIO_STOP, AUDIO_RESET, AUDIO_ROUTE }
+    enum class Control { STATUS, PHONE_CONNECT, INPUT_UNAVAILABLE, HOST_UI, BUSY, PONG, CLOSE, WEBCODECS, MIC_CONFIG, MIC_STOP, AUDIO_STOP, AUDIO_RESET, AUDIO_ROUTE }
     private data class Outgoing(val frame: WebSocketFrame, val afterSend: () -> Unit = {})
     private data class Video(val frame: WebSocketFrame, val keyframe: Boolean)
     private val lock = Any()

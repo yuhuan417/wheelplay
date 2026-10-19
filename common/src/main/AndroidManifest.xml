@@ -44,25 +44,7 @@
             android:screenOrientation="fullSensor"
             android:theme="@style/Theme.Xcertplay"
             android:windowSoftInputMode="adjustResize">
-
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-            </intent-filter>
-            <meta-data
-                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                android:resource="@xml/usb_device_filter" />
         </activity>
-
-        <activity
-            android:name="com.shilapi.xcertplay.MainActivity"
-            android:exported="false"
-            android:theme="@style/Theme.Xcertplay" />
-
-        <activity
-            android:name="com.shilapi.xcertplay.ImageCropActivity"
-            android:exported="false"
-            android:screenOrientation="fullSensor"
-            android:theme="@style/Theme.Xcertplay" />
 
         <receiver
             android:name="com.shilapi.xcertplay.BootReceiver"

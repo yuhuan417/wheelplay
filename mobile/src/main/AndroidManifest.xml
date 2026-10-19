@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
         android:allowBackup="false"
@@ -14,11 +13,7 @@
 
         <receiver
             android:name="com.shilapi.xcertplay.BootReceiver"
-            android:enabled="true"
-            tools:replace="android:enabled" />
-
-        <service android:name="com.shilapi.xcertplay.shared.MyCarAppService" tools:node="remove" />
-        <meta-data android:name="androidx.car.app.minCarApiLevel" tools:node="remove" />
+            android:enabled="true" />
     </application>
 
 </manifest>

@@ -75,8 +75,6 @@ class Iap2ProtocolTest {
     @Test
     fun carPlayStartSessionSupportsReferenceOptionalFields() {
         val frame = Iap2CarPlayMessages.startSession(
-            wiredIpv6Addresses = listOf("fe80::2"),
-            wiredReserved = 3L,
             wireless = Iap2WirelessSessionParameters(
                 ssid = "LIVI",
                 passphrase = "secret",
@@ -93,11 +91,9 @@ class Iap2ProtocolTest {
             mutualAuth = true,
         )
         val body = Iap2BodyReader.of(frame)
-        val wired = body.group(0)
         val wireless = body.group(1)
 
-        assertEquals("fe80::2", wired.string(0))
-        assertEquals(3L, wired.u32(1))
+        assertNull(body.optionalGroup(0))
         assertEquals("LIVI", wireless.string(0))
         assertEquals(2, wireless.all(3).size)
         assertEquals("192.168.1.2", wireless.all(3)[1].payload?.let { String(it).trimEnd('\u0000') })
@@ -152,17 +148,23 @@ class Iap2ProtocolTest {
     @Test
     fun formatterShowsEndpointNamesFieldsAndNestedGroups() {
         val frame = Iap2CarPlayMessages.startSession(
-            wiredIpv6Addresses = listOf("fe80::2"),
+            wireless = Iap2WirelessSessionParameters(
+                ssid = "LIVI",
+                passphrase = "secret",
+                channel = 36,
+                ipAddresses = listOf("192.168.1.1"),
+                securityType = 3,
+            ),
             airPlayPort = 7000,
             publicKey = "pub",
             sourceVersion = "1.0",
         )
 
-        val formatted = Iap2FrameFormatter.format(Iap2TraceDirection.TX, "wired", frame)
+        val formatted = Iap2FrameFormatter.format(Iap2TraceDirection.TX, "wireless", frame)
 
-        assertTrue(formatted.startsWith("IAP2 TX [wired] 0x4301 CarPlayStartSession"))
-        assertTrue("wired:" in formatted)
-        assertTrue("wiredIP: \"fe80::2\"" in formatted)
+        assertTrue(formatted.startsWith("IAP2 TX [wireless] 0x4301 CarPlayStartSession"))
+        assertTrue("[1] wireless:" in formatted)
+        assertTrue("SSID: \"LIVI\"" in formatted)
         assertTrue("airPlayPort: u32=7000" in formatted)
         assertTrue("raw-body=" in formatted)
     }
@@ -171,7 +173,7 @@ class Iap2ProtocolTest {
     fun formatterFallsBackForMalformedBodies() {
         val formatted = Iap2FrameFormatter.format(
             Iap2TraceDirection.RX,
-            "wired",
+            "wireless",
             Iap2Frame(0x4300, byteArrayOf(0, 1, 2)),
         )
 
@@ -179,11 +181,5 @@ class Iap2ProtocolTest {
         assertTrue(formatted.contains("raw-body=00 01 02"))
     }
 
-    @Test
-    fun formatterEscapesLineBreaksInNmeaStrings() {
-        val frame = Iap2ControlMessages.locationInformation("\$GPGGA,1\r\n")
-        val formatted = Iap2FrameFormatter.format(Iap2TraceDirection.TX, "wired", frame)
 
-        assertTrue(formatted.contains("\\r\\n"))
-    }
 }

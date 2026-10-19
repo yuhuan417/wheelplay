@@ -3,12 +3,12 @@
 核对日期：2026-09-30。本文描述 WheelPlay 当前实现，非原版车机本地显示模式。
 
 ```text
-iPhone ─ USB / 无线 CarPlay ─ CarPlayController / CarPlayMediaEngine
+iPhone ─ 无线 CarPlay ─ CarPlayController / CarPlayMediaEngine
                                       │ H.264 / HEVC
                                AndroidMediaSink
                                       │ decoder Surface
                               OffscreenVideoOutput
-                                      │ EGL → JPEG；支持压缩帧 WebRTC 直通
+                                      │ EGL → JPEG；压缩帧经控制 WebSocket 供 WebCodecs 解码
                                 WebSession 最新帧
                                       │
 车机浏览器 ← HTTP/HTTPS 静态资源及配对 WebSocket ← LanWebServer :8080 / :8443
@@ -27,12 +27,12 @@ Web 服务由 DiPlaySessionService 创建/销毁；离屏 Surface 生命周期�
 
 1. `GET /`、`GET /app.js`、`GET /style.css` 提供 APK 内置资产。
 2. `GET /stream?code=六位码` 升级为 WebSocket，要求 `Origin` 与 `Host` 同源。错误码返回 401；跨源返回 403；五次失败后暂停认证 30 秒。
-3. JPEG 模式下，服务端二进制消息是一张完整 JPEG。客户端 `<img>` 触发 `load` 后发送 `{"type":"ack"}`。每连接最多一帧等待 ACK；最新帧覆盖旧帧。WebRTC 视频可用时，压缩帧改由 WebRTC 发送。
+3. JPEG 模式下，服务端二进制消息是一张完整 JPEG。客户端 `<img>` 触发 `load` 后发送 `{"type":"ack"}`。每连接最多一帧等待 ACK；最新帧覆盖旧帧。WebCodecs 模式下不再发送 JPEG，压缩帧改由同一 WebSocket 以 `WVC1` 二进制帧发送。
 4. 客户端每 400 ms 发送 `{"type":"ping"}`；服务端回复 `{"type":"status","width":1280,"height":720,"streaming":true,"stage":"..."}`。
 5. 触摸消息 `{"type":"touch","contacts":[{"id":0,"x":0.5,"y":0.5,"down":true}]}`。坐标归一化到实际图像区域，排除 letterbox；最多两个固定槽位，缺失槽位为抬起。长按期间随心跳重发，超过 1500 ms 未收到触摸则释放。
 6. 已被占用时新连接收到 `{"type":"busy","message":"..."}` 后关闭。断线释放所有触点。页面失焦、隐藏或退出也主动释放。
 7. App 中的两个转发选项默认关闭并独立保存。服务端向已配对网页发送 `audio-route`，网页只用 `audio-ready` 回报浏览器音频与麦克风是否就绪；服务端按 App 选项和就绪状态决定是否转发。解码 PCM 打包为 `WPA1` 二进制帧（流号、采样率、声道、序号、PCM16LE）；浏览器通过 `audio-ack` 确认，最多四帧在途，过期帧丢弃。麦克风先等待 `mic-config`（采样率、声道、输入 ID），随后发送 `WPM1` PCM 帧；仅当前已配对浏览器且 ID/序号匹配时接收。断开、浏览器未就绪或关掉选项时恢复 Android 路由。
-8. `rtc-offer` 携带 `recoveryGraceMs`（4000 / 10000 / 30000，默认 10000），为本次 WebRTC 会话固定策略。发送端与浏览器对短暂断开、发送 / 关键帧恢复失败和持续解码停顿使用同一容忍时间；已显示的视频保留最后一帧。首帧至少等待 10 秒；不可恢复错误立即回退。压缩队列的 50 ms / 6 帧 / 2 MiB 上限不随策略增长。详见 [WebRTC 恢复说明](WEBRTC_RECOVERY.md)。
+8. WebCodecs 只在 HTTPS 页面提供：`webcodecs-config` 携带 avcC/hvcC 记录，`webcodecs-frame` 携带 PTS 与 Annex B 数据；浏览器通过 `webcodecs-ready`、`webcodecs-keyframe`、`webcodecs-fallback` 回报状态。该模式失败时保留错误并停止画面，不回退 JPEG。JPEG 模式无需 HTTPS，也不依赖浏览器视频解码能力。
 
 ## 生命周期与资源约束
 
@@ -45,10 +45,11 @@ Web 服务由 DiPlaySessionService 创建/销毁；离屏 Surface 生命周期�
 - 客户端首次连接超时为 8 秒；服务端在超过 6 秒未收到客户端消息或帧 ACK 时关闭连接并释放控制权，客户端也检查 6 秒状态回复超时。服务端看门狗每 500 ms 检查一次。
 - 静止画面不会仅因缺少新帧被判为断线；状态依据屏幕流是否激活。新浏览器加入时，离屏输出会补发已有静止画面。
 - 前台服务持有 PARTIAL_WAKE_LOCK，并在销毁时释放。移除界面任务不会主动停止服务；系统强杀和厂商省电策略仍需真机验证。
+- 断电待机恢复供电时先启用 Wi-Fi 并等待 STA 上行真正连接，再启动系统热点；否则 Tesla/iPhone 会因热点没有外网而拒绝或离开该连接。
 - 停止服务释放监听端口、客户端、定时器和输入状态。
 - JPEG 视频与浏览器播放音频可使用普通局域网 HTTP。浏览器麦克风和 AudioWorklet 需要安全上下文：服务额外开放 HTTPS 8443，证书由本机私有存储中保留的安装专属 CA 签发；根证书下载与 SHA-256 指纹供用户在车机浏览器核对并配置。HTTPS 与 HTTP 共用扫码配对状态和单浏览器控制权，来源按协议分别校验。部分车机浏览器不允许安装本地 CA，此时保持 Android 麦克风。
 
-浏览器音频使用 PCM/Web Audio，与 JPEG 或 WebRTC 视频模式独立。浏览器不能获得麦克风权限、关闭麦克风或连接断开时，服务端重新使用 Android 麦克风；CarPlay 设备端的实际音频路由与延迟仍需真机验证。
+浏览器音频使用 PCM/Web Audio，与 JPEG 或 WebCodecs 视频模式独立。浏览器不能获得麦克风权限、关闭麦克风或连接断开时，服务端重新使用 Android 麦克风；CarPlay 设备端的实际音频路由与延迟仍需真机验证。
 
 
 ## APK 界面层
@@ -57,7 +58,7 @@ Web 服务由 DiPlaySessionService 创建/销毁；离屏 Surface 生命周期�
 
 使用 Material Components 1.13.0 与 `Theme.Material3.Dark.NoActionBar`。按钮、开关、文本、分隔线、输入框、弹窗与连接进度指示器分别使用对应的 Material 组件；Tab 指示器采用组件默认动效，页面本身没有整屏平移。主题集中在 `themes.xml`。
 
-`CarPlayHostActivity` 保留协议控制器与权限申请的所有权，仅作为显式连接或 USB 接入流程使用，不再承载 Tab。会话启动后返回主界面，连接仍在后台运行。通知也直接打开主界面。打开主界面启动 Web 服务；自动连接继续受用户设置控制。断开 iPhone 后恢复独立 Web 服务，让服务面板继续可用。
+`CarPlayHostActivity` 保留协议控制器与权限申请的所有权，仅作为显式连接流程使用，不再承载 Tab。会话启动后返回主界面，连接仍在后台运行。通知也直接打开主界面。打开主界面启动 Web 服务；自动连接继续受用户设置控制。断开 iPhone 后恢复独立 Web 服务，让服务面板继续可用。
 
 控制器、认证、离屏解码和触摸协议未改动。连接方式与设置仍调用原有持久化和重连流程；启动连接时的权限由系统界面处理。主界面旋转时重建布局，但不重建 CarPlay 会话。
 
@@ -65,7 +66,7 @@ Web 服务由 DiPlaySessionService 创建/销毁；离屏 Surface 生命周期�
 
 选择型偏好使用 `ServerUi.PreferenceRow`：左侧标题，右侧当前值及方向提示，无按钮边框，整行带主题水波纹并支持键盘焦点和读屏。选择确认后更新值文本，原有 Material 单选弹窗与保存/重连回调保留。
 
-`LanAddresses` 结合 Android ConnectivityManager 的网络类型/当前网络及 NetworkInterface 的 IPv4 地址，保留接口来源；无法取得系统元数据时按接口名降级识别。稳定排序优先普通 Wi-Fi / 以太网，其次热点、USB、未知网络、Wi-Fi Direct、VPN、移动网络，同级优先当前网络。仅显示启用的非回环接口上的私有 IPv4 地址。主界面只展示首选项，其余默认折叠；每秒刷新地址变化时保留展开状态，避免反复重建地址列表。排序不代表对车机可达性的实际探测。
+`LanAddresses` 结合 Android ConnectivityManager 的网络类型/当前网络及 NetworkInterface 的 IPv4 地址，保留接口来源；无法取得系统元数据时按接口名降级识别。稳定排序优先普通 Wi-Fi / 以太网，其次热点、未知网络、VPN、移动网络，同级优先当前网络。仅显示启用的非回环接口上的私有 IPv4 地址。主界面只展示首选项，其余默认折叠；每秒刷新地址变化时保留展开状态，避免反复重建地址列表。排序不代表对车机可达性的实际探测。
 
 
 ## 扫码配对

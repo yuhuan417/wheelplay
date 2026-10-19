@@ -119,14 +119,11 @@ class ServerCardStateTest {
         val disconnect = button(activity, "断开 iPhone")
         assertEquals(View.GONE, connect.visibility)
         DiPlayPreferences.savePhone(activity, "00:11:22:33:44:55", "测试 iPhone")
-        AirPlayPersistence.saveWirelessHotspotMode(activity,
-            com.shilapi.xcertplay.orchestration.WirelessHotspotMode.WIFI_P2P)
         refresh()
         assertEquals(View.VISIBLE, connect.visibility); assertTrue(connect.isEnabled)
         render(activity, "phone-selected", bottom = true)
         connect.performClick()
         assertEquals(CarPlayHostActivity::class.java.name, shadowOf(activity).nextStartedActivity.component!!.className)
-        assertTrue(AirPlayPersistence.loadWirelessEnabled(activity))
         // Model a controller with a registered stop callback, including connection-in-progress.
         ReflectionHelpers.setField(CarPlayBackgroundSession, "stopAction",
             { completion: () -> Unit -> CarPlayBackgroundSession.clear(); completion() })

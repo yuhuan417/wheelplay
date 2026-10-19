@@ -24,12 +24,19 @@ internal object DuckDnsApi {
     fun clearTxtUrl(subdomain: String, token: String): String =
         "$API?domains=${encode(subdomain)}&token=${encode(token)}&txt=&clear=true&verbose=true"
 
-    fun update(url: String): Result {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+    fun update(
+        url: String,
+        openConnection: (String) -> HttpURLConnection = {
+            URL(it).openConnection() as HttpURLConnection
+        },
+    ): Result {
+        val connection = openConnection(url).apply {
             requestMethod = "GET"
             connectTimeout = 15_000
             readTimeout = 30_000
             instanceFollowRedirects = true
+            useCaches = false
+            setRequestProperty("Cache-Control", "no-cache")
             setRequestProperty("User-Agent", "WheelPlay/1.0")
         }
         return try {

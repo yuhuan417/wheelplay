@@ -212,16 +212,14 @@ class PowerSaveStandbyTest {
         val originalAvailable = RootRadioPower.rootAvailable
         val originalExecute = RootRadioPower.executeRootScript
         val originalVerify = RootRadioPower.verifyRadioOff
+        val originalWifiUplink = RootRadioPower.wifiUplinkReady
         val scripts = java.util.concurrent.CopyOnWriteArrayList<String>()
         val standbyExecuted = java.util.concurrent.CountDownLatch(1)
         val wakeExecuted = java.util.concurrent.CountDownLatch(1)
         try {
-            AirPlayPersistence.saveWirelessHotspotMode(
-                app,
-                com.shilapi.xcertplay.orchestration.WirelessHotspotMode.MANUAL,
-            )
             RootRadioPower.rootAvailable = { true }
             RootRadioPower.verifyRadioOff = { true }
+            RootRadioPower.wifiUplinkReady = { true }
             RootRadioPower.executeRootScript = { script ->
                 scripts.add(script)
                 if (script.contains("RootHotspotMain stop")) standbyExecuted.countDown()
@@ -244,12 +242,16 @@ class PowerSaveStandbyTest {
             assertTrue(standbyScript.contains("cmd wifi stop-softap"))
             assertTrue(standbyScript.contains("cmd wifi set-wifi-enabled disabled"))
 
-            val wakeScript = scripts.first { it.contains("RootHotspotMain start") }
-            assertTrue(wakeScript.contains("cmd wifi set-wifi-enabled enabled"))
+            val hotspotIndex = scripts.indexOfFirst { it.contains("RootHotspotMain start") }
+            assertTrue("hotspot wake script must exist", hotspotIndex >= 0)
+            val wifiIndex = scripts.indexOfFirst { it.contains("cmd wifi set-wifi-enabled enabled") }
+            assertTrue("Wi-Fi must be enabled", wifiIndex >= 0)
+            assertTrue("Wi-Fi must be enabled before the hotspot starts", wifiIndex < hotspotIndex)
         } finally {
             RootRadioPower.rootAvailable = originalAvailable
             RootRadioPower.executeRootScript = originalExecute
             RootRadioPower.verifyRadioOff = originalVerify
+            RootRadioPower.wifiUplinkReady = originalWifiUplink
             RootRadioPower.suspendedByStandby = false
         }
     }

@@ -119,13 +119,6 @@ class Iap2Session private constructor(
     companion object {
         private const val DEFAULT_SEND_TIMEOUT_MILLIS = 5_000L
 
-        fun open(
-            underlying: BlockingDuplexByteStream,
-            traceContext: String = "wired",
-            onTrace: (String) -> Unit = {},
-        ): Iap2Session =
-            Iap2Session(Iap2CsmChannel.open(underlying), traceContext, onTrace)
-
         fun openWireless(
             underlying: BlockingDuplexByteStream,
             traceContext: String = "wireless",

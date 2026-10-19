@@ -43,7 +43,7 @@ internal class NativeVideoDecoder(key: ByteArray, platform: Boolean = false) : V
     external fun keyframe(frame: Long, hevc: Boolean): Boolean
     external fun release(frame: Long)
     private external fun destroy(handle: Long)
-    companion object { init { System.loadLibrary("wheelplay-rtc") } }
+    companion object { init { System.loadLibrary("wheelplay-video") } }
 }
 
 /** The native pool outlives its decoder until every retained frame is returned. */

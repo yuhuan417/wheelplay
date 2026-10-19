@@ -16,7 +16,7 @@ class Iap2RouteGuidanceSubscriptionTest {
             serialNumber = "xcertplay",
             firmwareVersion = "1.0.0",
             hardwareVersion = "1.0",
-            carPlayUsbInterfaceNumber = 3,
+            wireless = Iap2WirelessIdentification("00:11:22:33:44:55", "test-ssid"),
         )
 
         val parameters = Iap2ParameterList.parse(

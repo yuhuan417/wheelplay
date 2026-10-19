@@ -56,8 +56,6 @@ object Iap2CarPlayMessages {
         airPlayPort: Int,
         publicKey: String,
         sourceVersion: String,
-        wiredIpv6Addresses: List<String> = emptyList(),
-        wiredReserved: Long? = null,
         wireless: Iap2WirelessSessionParameters? = null,
         deviceIdentifier: String? = null,
         sdkVersion: String? = null,
@@ -69,12 +67,6 @@ object Iap2CarPlayMessages {
         require(sourceVersion.isNotEmpty()) { "sourceVersion must not be empty" }
 
         return Iap2Messages.build(Iap2Endpoints.CARPLAY_START_SESSION) {
-            if (wiredIpv6Addresses.isNotEmpty() || wiredReserved != null) {
-                group(0) {
-                    wiredIpv6Addresses.forEach { string(0, it) }
-                    optionalU32(1, wiredReserved)
-                }
-            }
             wireless?.let {
                 group(1) {
                     string(0, it.ssid)
@@ -98,57 +90,7 @@ object Iap2CarPlayMessages {
             optionalU8(8, mutualAuth?.let { if (it) 1 else 0 })
         }
     }
-
-    fun availability(frame: Iap2Frame): Iap2CarPlayAvailability {
-        require(frame.messageId == Iap2Endpoints.CARPLAY_AVAILABILITY.id) {
-            "Expected CarPlayAvailability, got 0x${frame.messageId.toString(16)}"
-        }
-        return availability(frame.payload)
-    }
-
-    /** Decodes an already extracted 0x4300 body without requiring the caller to rebuild a frame. */
-    fun availability(payload: ByteArray): Iap2CarPlayAvailability {
-        val body = Iap2BodyReader.of(Iap2ParameterList.parse(payload))
-        val wired = body.optionalGroup(0)?.let {
-            Iap2AvailabilityState(
-                available = decodeAvailability(it.optionalU8(0), "wired"),
-                identifier = it.optionalString(1),
-            )
-        }
-        val wireless = body.optionalGroup(1)?.let {
-            Iap2AvailabilityState(
-                available = decodeAvailability(it.optionalU8(0), "wireless"),
-                identifier = it.optionalString(1),
-            )
-        }
-        val themeAssets = body.optionalGroup(2)?.let {
-            Iap2AvailabilityState(
-                available = decodeAvailability(it.optionalU8(0), "themeAssets"),
-                identifier = null,
-            )
-        }
-        return Iap2CarPlayAvailability(wired, wireless, themeAssets)
-    }
-
-    private fun decodeAvailability(value: Int?, label: String): Boolean? {
-        if (value == null) return null
-        if (value !in 0..1) {
-            throw Iap2ProtocolException("$label availability must be 0 or 1, got $value")
-        }
-        return value == 1
-    }
 }
-
-data class Iap2AvailabilityState(
-    val available: Boolean?,
-    val identifier: String?,
-)
-
-data class Iap2CarPlayAvailability(
-    val wired: Iap2AvailabilityState?,
-    val wireless: Iap2AvailabilityState?,
-    val themeAssets: Iap2AvailabilityState?,
-)
 
 /** Typed codecs for Wi-Fi sharing and Wireless CarPlay notifications. */
 object Iap2WirelessMessages {
@@ -259,22 +201,8 @@ data class Iap2DeviceTransportIdentifier(
     val usbTransportIdentifier: String?,
 )
 
-/** Typed codecs for power and subscription requests used during bring-up. */
+/** Typed codecs for subscription requests used during bring-up. */
 object Iap2ControlMessages {
-    fun powerSourceUpdate(
-        availableCurrentMilliAmps: Int,
-        charging: Boolean? = null,
-        availableSiphoningCurrentMilliAmps: Int? = null,
-        reserveCurrentMilliAmps: Int? = null,
-        maxNonSiphoningCurrentExceeded: Boolean = false,
-    ): Iap2Frame = Iap2Messages.build(Iap2Endpoints.POWER_SOURCE_UPDATE) {
-        u16(0, availableCurrentMilliAmps)
-        optionalU8(1, charging?.let { if (it) 1 else 0 })
-        optionalU16(3, availableSiphoningCurrentMilliAmps)
-        optionalU16(4, reserveCurrentMilliAmps)
-        optionalVoid(5, maxNonSiphoningCurrentExceeded)
-    }
-
     fun subscriptions(): List<Iap2Frame> = listOf(
         Iap2NowPlayingCodec.subscription(),
         Iap2Messages.build(Iap2Endpoints.START_ROUTE_GUIDANCE_UPDATES) {
@@ -302,10 +230,5 @@ object Iap2ControlMessages {
         },
     )
 
-    fun locationInformation(nmeaSentence: String): Iap2Frame {
-        require(nmeaSentence.isNotEmpty()) { "NMEA sentence must not be empty" }
-        return Iap2Messages.build(Iap2Endpoints.LOCATION_INFORMATION) {
-            string(0, nmeaSentence)
-        }
-    }
+
 }

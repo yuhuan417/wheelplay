@@ -398,7 +398,7 @@ class Iap2LinkChannel private constructor(
         private const val MAX_PENDING_CONTROLS = 64
         private const val MAX_PENDING_CONTROL_BYTES = 1_048_576
 
-        private val WIRED_LINK_CONFIG = Iap2LinkConfig(
+        private val TUNNEL_LINK_CONFIG = Iap2LinkConfig(
             maxOutgoing = 4,
             controlSessionVersion = 2,
             zeroAcknowledgements = true,
@@ -407,11 +407,6 @@ class Iap2LinkChannel private constructor(
             maxOutgoing = 4,
             controlSessionVersion = 2,
         )
-
-        /** Opens and immediately starts a wired iAP2 link, taking ownership of the supplied stream. */
-        fun open(underlying: BlockingDuplexByteStream): Iap2LinkChannel =
-            Iap2LinkChannel(underlying, WIRED_LINK_CONFIG, initiateNegotiation = true)
-                .also { it.worker.start() }
 
         /**
          * Opens a wireless RFCOMM link. LIVI sends the iAP2 marker but lets the phone initiate
@@ -426,7 +421,7 @@ class Iap2LinkChannel private constructor(
          * synchronization and zero-acknowledgement mode matches the Wi-Fi transport.
          */
         fun openTunnel(underlying: BlockingDuplexByteStream): Iap2LinkChannel =
-            Iap2LinkChannel(underlying, WIRED_LINK_CONFIG, initiateNegotiation = true)
+            Iap2LinkChannel(underlying, TUNNEL_LINK_CONFIG, initiateNegotiation = true)
                 .also { it.worker.start() }
 
         private fun nowMillis(): Long = System.nanoTime() / NANOS_PER_MILLISECOND

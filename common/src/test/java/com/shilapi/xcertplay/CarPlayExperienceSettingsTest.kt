@@ -40,8 +40,7 @@ class CarPlayExperienceSettingsTest {
 
     @Test fun hostBlockedByMissingAuthenticationDoesNotRequestMicrophonePermission() {
         AirPlayPersistence.saveMicrophoneSource(context, CarPlayMicrophoneSource.BROWSER)
-        val controller = Robolectric.buildActivity(CarPlayHostActivity::class.java,
-            android.content.Intent("android.hardware.usb.action.USB_DEVICE_ATTACHED")).setup()
+        val controller = Robolectric.buildActivity(CarPlayHostActivity::class.java).setup()
         val host = controller.get()
         assertTrue(host.isFinishing)
         assertNull(shadowOf(host).lastRequestedPermission)

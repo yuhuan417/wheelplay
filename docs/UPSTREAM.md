@@ -17,7 +17,7 @@ Android Gradle 工程已提升至项目根目录：`mobile/`、`common/`、`shar
 
 ## CarPlay 返回入口图标
 
-默认名称及图标改为 `NIO`，旧安装保存的默认 `BYD` 名称在读取时迁移为 `NIO`。相关商标及图标属于其原权利人，不纳入本项目代码许可证授权范围。此变更仅影响 CarPlay 返回入口的名称和默认图标，不集成蔚来 App 功能，也不改变点击行为。
+当前构建固定使用打包的默认图标与制造商名称，不再提供自定义名称或图标设置。
 
 ## Material 界面组件
 
@@ -48,7 +48,6 @@ Material Components for Android 1.13.0（Apache-2.0），使用官方 Material 3
 | 扫描二维码配对按钮 · `ic_server_scan` | [qr_code_scanner](https://github.com/google/material-design-icons/blob/master/src/communication/qr_code_scanner/materialicons/24px.svg) |
 | 浏览器配对卡片 · `ic_server_qr` | [qr_code_2](https://github.com/google/material-design-icons/blob/master/src/communication/qr_code_2/materialicons/24px.svg) |
 | 无线连接卡片 · `ic_server_wifi` | [wifi](https://github.com/google/material-design-icons/blob/master/src/notification/wifi/materialicons/24px.svg) |
-| USB 连接卡片 · `ic_server_usb` | [usb](https://github.com/google/material-design-icons/blob/master/src/device/usb/materialicons/24px.svg) |
 | 设置 Tab · `ic_server_settings` | [settings](https://github.com/google/material-design-icons/blob/master/src/action/settings/materialicons/24px.svg) |
 | 设置选择器、其他地址展开箭头 · `ic_settings_chevron` | [chevron_right](https://github.com/google/material-design-icons/blob/master/src/navigation/chevron_right/materialicons/24px.svg) |
 | 网页连接按钮 · 内嵌 SVG | [arrow_forward](https://github.com/google/material-design-icons/blob/master/src/navigation/arrow_forward/materialicons/24px.svg) |
