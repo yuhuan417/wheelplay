@@ -30,6 +30,8 @@ class PowerSaveStandbyTest {
         private lateinit var originalRootAvailable: () -> Boolean
         private lateinit var originalExecuteRootScript: (String) -> Boolean
         private lateinit var originalVerifyRadioOff: (android.content.Context) -> Boolean
+        private lateinit var originalBluetoothEnabled: (android.content.Context) -> Boolean
+        private lateinit var originalSetBluetoothEnabled: (android.content.Context, Boolean) -> Unit
 
         @JvmStatic
         @org.junit.BeforeClass
@@ -37,6 +39,8 @@ class PowerSaveStandbyTest {
             originalRootAvailable = RootRadioPower.rootAvailable
             originalExecuteRootScript = RootRadioPower.executeRootScript
             originalVerifyRadioOff = RootRadioPower.verifyRadioOff
+            originalBluetoothEnabled = RootRadioPower.bluetoothEnabled
+            originalSetBluetoothEnabled = RootRadioPower.setBluetoothEnabled
         }
 
         @JvmStatic
@@ -45,6 +49,8 @@ class PowerSaveStandbyTest {
             RootRadioPower.rootAvailable = originalRootAvailable
             RootRadioPower.executeRootScript = originalExecuteRootScript
             RootRadioPower.verifyRadioOff = originalVerifyRadioOff
+            RootRadioPower.bluetoothEnabled = originalBluetoothEnabled
+            RootRadioPower.setBluetoothEnabled = originalSetBluetoothEnabled
             RootRadioPower.suspendedByStandby = false
         }
     }
@@ -62,6 +68,8 @@ class PowerSaveStandbyTest {
         RootRadioPower.rootAvailable = { false }
         RootRadioPower.executeRootScript = { true }
         RootRadioPower.verifyRadioOff = { true }
+        RootRadioPower.bluetoothEnabled = { true }
+        RootRadioPower.setBluetoothEnabled = { _, _ -> }
     }
 
     @After
@@ -71,6 +79,7 @@ class PowerSaveStandbyTest {
         RootRadioPower.suspendedByStandby = false
         RootRadioPower.restoreWifiOnWake = false
         RootRadioPower.restoreHotspotOnWake = false
+        RootRadioPower.restoreBluetoothOnWake = false
         RootRadioPower.lastStandbyRadioOff = null
     }
 
@@ -214,12 +223,17 @@ class PowerSaveStandbyTest {
         val originalVerify = RootRadioPower.verifyRadioOff
         val originalWifiUplink = RootRadioPower.wifiUplinkReady
         val scripts = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val bluetoothEvents = java.util.concurrent.CopyOnWriteArrayList<Boolean>()
         val standbyExecuted = java.util.concurrent.CountDownLatch(1)
         val wakeExecuted = java.util.concurrent.CountDownLatch(1)
         try {
             RootRadioPower.rootAvailable = { true }
             RootRadioPower.verifyRadioOff = { true }
+        RootRadioPower.bluetoothEnabled = { true }
+        RootRadioPower.setBluetoothEnabled = { _, _ -> }
             RootRadioPower.wifiUplinkReady = { true }
+            RootRadioPower.bluetoothEnabled = { true }
+            RootRadioPower.setBluetoothEnabled = { _, enabled -> bluetoothEvents += enabled }
             RootRadioPower.executeRootScript = { script ->
                 scripts.add(script)
                 if (script.contains("RootHotspotMain stop")) standbyExecuted.countDown()
@@ -247,6 +261,8 @@ class PowerSaveStandbyTest {
             val wifiIndex = scripts.indexOfFirst { it.contains("cmd wifi set-wifi-enabled enabled") }
             assertTrue("Wi-Fi must be enabled", wifiIndex >= 0)
             assertTrue("Wi-Fi must be enabled before the hotspot starts", wifiIndex < hotspotIndex)
+            assertTrue("standby must disable Bluetooth", false in bluetoothEvents)
+            assertTrue("wake must re-enable Bluetooth", true in bluetoothEvents)
         } finally {
             RootRadioPower.rootAvailable = originalAvailable
             RootRadioPower.executeRootScript = originalExecute

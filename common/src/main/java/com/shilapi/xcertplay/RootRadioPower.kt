@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay
 
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.wifi.WifiManager
@@ -21,9 +22,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Uses Root (`su`) during power-save standby to completely power down the system Wi-Fi radio and
- * system Wi-Fi hotspot (SoftAP / Tethering / MIUI WLAN bridge), and restores them upon waking
- * when external power returns.
+ * Uses Root (`su`) during power-save standby to completely power down the system Wi-Fi radio,
+ * Wi-Fi hotspot (SoftAP / Tethering / MIUI WLAN bridge) and Bluetooth, and restores them upon
+ * waking when external power returns.
  */
 internal object RootRadioPower {
     private const val TAG = "xcertplay-usb"
@@ -31,6 +32,8 @@ internal object RootRadioPower {
     private const val STANDBY_DEBOUNCE_MILLIS = 3_000L
     private const val WIFI_UPLINK_TIMEOUT_MILLIS = 30_000L
     private const val WIFI_UPLINK_POLL_MILLIS = 250L
+    private const val BLUETOOTH_WAKE_TIMEOUT_MILLIS = 10_000L
+    private const val BLUETOOTH_WAKE_POLL_MILLIS = 250L
     private const val RADIO_OFF_CHECKS = 3
     private const val RADIO_OFF_RECHECK_MILLIS = 500L
     private const val SHELL_PATH =
@@ -59,6 +62,10 @@ internal object RootRadioPower {
 
     @Volatile
     internal var restoreHotspotOnWake = false
+
+    /** Bluetooth was enabled when power was cut; turn it back on after the radio wake. */
+    @Volatile
+    internal var restoreBluetoothOnWake = false
 
     /** Last verified outcome of the standby teardown; null until a standby request completes. */
     @Volatile
@@ -94,13 +101,22 @@ internal object RootRadioPower {
     @Volatile
     internal var wifiUplinkReady: (Context) -> Boolean = WifiUplink::isReady
 
+    /** Test seams so unit tests do not touch the real Bluetooth stack. */
+    @Volatile
+    internal var bluetoothEnabled: (Context) -> Boolean = ::defaultBluetoothEnabled
+
+    @Volatile
+    internal var setBluetoothEnabled: (Context, Boolean) -> Unit = ::defaultSetBluetoothEnabled
+
     fun enterStandby(context: Context, onComplete: ((Boolean) -> Unit)? = null) {
         wakeGeneration.incrementAndGet()
         val appContext = context.applicationContext
         // The only CarPlay transport is wireless and uses the configured manual hotspot.
         restoreWifiOnWake = true
         restoreHotspotOnWake = true
+        val bluetoothWasEnabled = runCatching { bluetoothEnabled(appContext) }.getOrDefault(false)
         val duplicate = synchronized(this) {
+            if (!suspendedByStandby) restoreBluetoothOnWake = bluetoothWasEnabled
             val now = SystemClock.elapsedRealtime()
             val duplicate = suspendedByStandby && now - lastStandbyRequestAt < STANDBY_DEBOUNCE_MILLIS
             lastStandbyRequestAt = now
@@ -115,6 +131,10 @@ internal object RootRadioPower {
         worker.execute {
             var radioOff = false
             try {
+                if (restoreBluetoothOnWake) {
+                    runCatching { setBluetoothEnabled(appContext, false) }
+                        .onFailure { log("Standby Bluetooth disable failed: ${it.message}") }
+                }
                 if (!rootAvailable()) {
                     log("Standby radio power-off skipped: root is not available")
                     return@execute
@@ -184,7 +204,16 @@ internal object RootRadioPower {
 
         worker.execute {
             try {
-                if (!rootAvailable()) return@execute
+                if (restoreBluetoothOnWake) {
+                    runCatching { setBluetoothEnabled(appContext, true) }
+                        .onFailure { log("Wake Bluetooth enable failed: ${it.message}") }
+                }
+                if (!rootAvailable()) {
+                    if (restoreBluetoothOnWake) {
+                        log("Wake Bluetooth requested without root; adapter fallback used")
+                    }
+                    return@execute
+                }
                 val wifiOff = runCatching {
                     appContext.getSystemService(WifiManager::class.java)?.isWifiEnabled == false
                 }.getOrDefault(false)
@@ -204,6 +233,7 @@ internal object RootRadioPower {
                             packageName = packageName,
                             enableWifi = true,
                             enableHotspot = false,
+                            enableBluetooth = restoreBluetoothOnWake,
                         ),
                     ).also {
                         runCatching {
@@ -221,6 +251,14 @@ internal object RootRadioPower {
                 val wifiReady = if (needWifi) awaitWifiUplink(appContext, generation) else true
                 if (needWifi) {
                     log("Wake Wi-Fi uplink ready=$wifiReady (script=$wifiScriptOk)")
+                }
+                val bluetoothReady = if (restoreBluetoothOnWake) {
+                    awaitBluetoothEnabled(appContext, generation)
+                } else {
+                    true
+                }
+                if (restoreBluetoothOnWake) {
+                    log("Wake Bluetooth ready=$bluetoothReady")
                 }
 
                 // Phase 2: only now start tethering/SoftAP.
@@ -248,7 +286,7 @@ internal object RootRadioPower {
                 log(
                     "Wake radio power-on executed (wifiScript=$wifiScriptOk " +
                         "hotspotScript=$hotspotScriptOk wifiReady=$wifiReady " +
-                        "wifi=$needWifi hotspot=$needHotspot)",
+                        "bluetoothReady=$bluetoothReady wifi=$needWifi hotspot=$needHotspot)",
                 )
             } finally {
                 onComplete?.invoke()
@@ -272,6 +310,8 @@ internal object RootRadioPower {
         appendLine("cmd wifi stop-softap >/dev/null 2>&1 || true")
         appendLine("svc wifi disable >/dev/null 2>&1 || true")
         appendLine("cmd wifi set-wifi-enabled disabled >/dev/null 2>&1 || true")
+        appendLine("svc bluetooth disable >/dev/null 2>&1 || true")
+        appendLine("cmd bluetooth_manager disable >/dev/null 2>&1 || true")
         appendLine("setprop ctl.stop hostapd >/dev/null 2>&1 || true")
         // Several ROMs (MIUI included) keep the SoftAP beaconing after `svc wifi disable`.
         // Dropping every Wi-Fi/AP interface guarantees the SSID disappears.
@@ -300,9 +340,14 @@ internal object RootRadioPower {
         packageName: String,
         enableWifi: Boolean,
         enableHotspot: Boolean,
+        enableBluetooth: Boolean = false,
     ): String = buildString {
         appendLine("appops set $packageName WRITE_SETTINGS allow >/dev/null 2>&1 || true")
         appendLine("cmd appops set $packageName WRITE_SETTINGS allow >/dev/null 2>&1 || true")
+        if (enableBluetooth) {
+            appendLine("svc bluetooth enable >/dev/null 2>&1 || true")
+            appendLine("cmd bluetooth_manager enable >/dev/null 2>&1 || true")
+        }
         if (enableWifi) {
             appendLine("ip link set wlan0 up >/dev/null 2>&1 || true")
             appendLine("svc wifi enable >/dev/null 2>&1 || true")
@@ -323,6 +368,33 @@ internal object RootRadioPower {
             appendLine("cmd tethering start wifi >/dev/null 2>&1 || true")
         }
         appendLine("exit 0")
+    }
+
+    private fun awaitBluetoothEnabled(context: Context, generation: Int): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + BLUETOOTH_WAKE_TIMEOUT_MILLIS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (generation != wakeGeneration.get()) return false
+            if (runCatching { bluetoothEnabled(context) }.getOrDefault(false)) return true
+            try {
+                Thread.sleep(BLUETOOTH_WAKE_POLL_MILLIS)
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return generation == wakeGeneration.get() &&
+            runCatching { bluetoothEnabled(context) }.getOrDefault(false)
+    }
+
+    private fun defaultBluetoothEnabled(context: Context): Boolean = runCatching {
+        context.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
+    }.getOrDefault(false)
+
+    @Suppress("DEPRECATION")
+    private fun defaultSetBluetoothEnabled(context: Context, enabled: Boolean) {
+        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: return
+        runCatching { if (enabled) adapter.enable() else adapter.disable() }
+            .onFailure { log("Bluetooth adapter ${if (enabled) "enable" else "disable"} failed: ${it.message}") }
     }
 
     private fun awaitWifiUplink(context: Context, generation: Int): Boolean {

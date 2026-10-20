@@ -67,8 +67,10 @@ Tesla 兼容模式的 Root 路由只认**系统热点**——它监听 `TETHER_S
 若先开热点，Tesla 和 iPhone 会在连接 M 后发现没有外网而认为热点不可用。
 `RootRadioPower.wakeFromStandby()` 现在分两阶段执行：
 
-1. 启用 Wi-Fi，并轮询 `WifiUplink.isReady()`（Wi-Fi 传输 + INTERNET 能力，或已关联 SSID）；
-2. 上行就绪后才启动系统热点。
+1. 启用 Wi-Fi 和蓝牙，并轮询 `WifiUplink.isReady()`（Wi-Fi 传输 + INTERNET 能力，或已关联 SSID）；
+2. 上行就绪后才启动系统热点；蓝牙最多等待 10 秒恢复。
+
+断电待机时会同时关闭蓝牙以省电，并记录断电前蓝牙是否开启；恢复供电只恢复原先开启的蓝牙。
 
 `CarPlayController` 在建立蓝牙/iAP2 前也会做一次同样的上行等待，避免手动连接时
 iPhone 被过早要求加入没有外网的热点。

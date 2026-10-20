@@ -461,6 +461,17 @@ class CarPlayController(
 
             val adapter = bluetoothAdapter
                 ?: throw IOException("Bluetooth adapter is unavailable")
+            if (!adapter.isEnabled) {
+                // Power-save standby turns Bluetooth off; the radio worker turns it back on
+                // asynchronously after external power returns.
+                debugLog("wireless waiting for Bluetooth to turn on")
+                val deadline = System.nanoTime() + BLUETOOTH_ENABLE_WAIT_NANOS
+                while (!adapter.isEnabled && !isStaleWirelessRun(generation) &&
+                    System.nanoTime() < deadline
+                ) {
+                    Thread.sleep(BLUETOOTH_ENABLE_POLL_MILLIS)
+                }
+            }
             if (!adapter.isEnabled) throw IOException("Bluetooth is not enabled")
             val device = selectWirelessBluetoothDevice(adapter)
             val hostBluetoothMac = accessoryBluetoothMac(adapter)
@@ -1230,6 +1241,8 @@ class CarPlayController(
         private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
         private const val HOTSPOT_START_TIMEOUT_MILLIS = 60_000L
         private const val WIRELESS_UPLINK_WAIT_MILLIS = 15_000L
+        private const val BLUETOOTH_ENABLE_WAIT_NANOS = 10_000_000_000L
+        private const val BLUETOOTH_ENABLE_POLL_MILLIS = 250L
         private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L
         private const val WIRELESS_HANDOFF_TIMEOUT_MILLIS = 45_000L
