@@ -230,6 +230,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var startAfterHandshakeReset = false
     private var restartGeneration = 0
     private var reconnectScheduled = false
+    private var automaticReconnectAllowed = true
     private var sessionLog: SessionLogFile? = null
     private var gestureSequenceActive = false
     private var gestureTracking = false
@@ -1707,6 +1708,8 @@ class CarPlayHostActivity : ComponentActivity() {
                 hotspotStatus.copy(state = "Running")
             CarPlayStatus.WirelessActive ->
                 hotspotStatus.copy(state = "Active")
+            CarPlayStatus.WirelessActiveFallback ->
+                hotspotStatus.copy(state = "Active (Bluetooth control)")
             CarPlayStatus.AttachingNetwork ->
                 hotspotStatus.copy(state = "Starting AirPlay service")
             is CarPlayStatus.Failed -> hotspotStatus.copy(state = "Error")
@@ -2223,11 +2226,14 @@ class CarPlayHostActivity : ComponentActivity() {
         controllerGeneration: Int,
     ): (CarPlayStatus) -> Unit = { status ->
         if (!menuOpen && controllerGeneration == restartGeneration) {
+            if (status is CarPlayStatus.Failed && !status.automaticRetry) {
+                automaticReconnectAllowed = false
+            }
             updateHotspotStatus(status)
             val description = status.describe()
             setConnectionStage(description)
             when (status) {
-                is CarPlayStatus.Failed -> reconnectAfterLoss(description)
+                is CarPlayStatus.Failed -> if (status.automaticRetry) reconnectAfterLoss(description)
                 else -> Unit
             }
         }
@@ -2291,6 +2297,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun startCarPlay(size: DisplaySize) {
         if (CarPlayBackgroundSession.hasSession() && !CarPlayBackgroundSession.isOwner(this)) return
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress || controller != null) return
+        automaticReconnectAllowed = true
         if (runCatching { DiPlayBootstrap.ensure(this) }.isFailure) {
             setConnectionStage("内置认证资源不可用，请重新安装应用")
             return
@@ -2506,6 +2513,7 @@ class CarPlayHostActivity : ComponentActivity() {
         if (CarPlayBackgroundSession.isUnpluggedOnBattery(this)) 0 else MAX_CHARGING_RECONNECT_ATTEMPTS
 
     private fun reconnectAfterLoss(reason: String) {
+        if (!automaticReconnectAllowed) return
         if (!CarPlayBackgroundSession.isOwner(this)) return
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress) return
         if (reconnectScheduled) return
@@ -2531,6 +2539,7 @@ class CarPlayHostActivity : ComponentActivity() {
             {
                 reconnectScheduled = false
                 if (
+                    !automaticReconnectAllowed ||
                     shuttingDown.get() ||
                     menuOpen ||
                     handshakeResetInProgress ||
@@ -2906,6 +2915,7 @@ class CarPlayHostActivity : ComponentActivity() {
         CarPlayStatus.ConnectingBluetooth -> "Connecting Bluetooth"
         CarPlayStatus.RunningWireless -> "Wireless CarPlay control running"
         CarPlayStatus.WirelessActive -> "Wireless CarPlay active"
+        CarPlayStatus.WirelessActiveFallback -> "Wireless CarPlay active with Bluetooth control"
         CarPlayStatus.AttachingNetwork -> "Starting AirPlay service"
         CarPlayStatus.ControlEnded -> "CarPlay control window ended"
         is CarPlayStatus.Failed -> "Failed: ${message}"
