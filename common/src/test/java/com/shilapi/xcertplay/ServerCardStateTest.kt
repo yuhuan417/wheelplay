@@ -25,7 +25,6 @@ import org.robolectric.annotation.GraphicsMode
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.util.ReflectionHelpers
 import java.io.File
-import java.net.Socket
 import java.time.Duration
 
 @RunWith(RobolectricTestRunner::class)
@@ -76,40 +75,6 @@ class ServerCardStateTest {
         File(output, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         bitmap.recycle()
         return root
-    }
-
-    @Test fun browserPairingControlsCollapseForAnAuthenticatedViewerAndReturnAfterDisconnect() {
-        val activity = activity()
-        WebSession.start(activity)
-        refresh()
-        val scan = button(activity, "扫描二维码配对")
-        val controls = scan.parent as LinearLayout
-        val code = views(controls).filterIsInstance<TextView>().single { it.text.toString() == WebSession.code }
-        val card = controls.parent as LinearLayout
-        render(activity, "browser-unpaired")
-        val expandedHeight = card.height
-        assertTrue(scan.isShown); assertTrue(code.isShown)
-        Socket("127.0.0.1", 8080).use { socket ->
-            socket.soTimeout = 2000
-            socket.getOutputStream().write(("GET /stream?code=${WebSession.code} HTTP/1.1\r\n" +
-                "Host: 127.0.0.1:8080\r\nOrigin: http://127.0.0.1:8080\r\n" +
-                "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" +
-                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").toByteArray())
-            val headers = StringBuilder()
-            while (!headers.endsWith("\r\n\r\n")) {
-                val next = socket.getInputStream().read(); check(next >= 0); headers.append(next.toChar())
-            }
-            assertTrue(headers.startsWith("HTTP/1.1 101"))
-            waitUntil { WebSession.hasViewer }; refresh()
-            render(activity, "browser-paired")
-            assertFalse(scan.isShown); assertFalse(code.isShown)
-            assertTrue("Paired card must reclaim the control group's space", card.height < expandedHeight)
-            assertTrue(views(card).filterIsInstance<TextView>().any { it.isShown && it.text == "车机浏览器已连接" })
-        }
-        waitUntil { !WebSession.hasViewer }; refresh()
-        render(activity, "browser-disconnected")
-        assertTrue(scan.isShown); assertTrue(code.isShown)
-        assertEquals(expandedHeight, card.height)
     }
 
     @Test fun selectedPhoneCanConnectFromLaunchAndRunningSessionsHideBothConnectActions() {

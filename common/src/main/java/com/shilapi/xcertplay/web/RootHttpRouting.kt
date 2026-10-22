@@ -21,7 +21,8 @@ internal data class HttpDownstream(val name: String, val index: Int, val subnet:
 }
 
 internal data class RootHttpPlan(val address: String, val port: Int, val downstreams: List<HttpDownstream>, val httpsPort: Int? = null,
-                                val httpMappingPort: Int? = null, val httpsMappingPort: Int? = null) {
+                                val httpMappingPort: Int? = null, val httpsMappingPort: Int? = null,
+                                val probe: Boolean = false) {
     init {
         require(TeslaHttpConfig.isHttpAddress(address) && port in 1024..65535)
         require(downstreams.isNotEmpty() && downstreams.distinctBy { it.name }.size == downstreams.size)
@@ -29,6 +30,8 @@ internal data class RootHttpPlan(val address: String, val port: Int, val downstr
         require(httpMappingPort == null || httpMappingPort in 1..1023)
         require(httpsMappingPort == null || httpsMappingPort in 1..1023 && httpsPort != null)
         require(httpMappingPort == null || httpMappingPort != httpsMappingPort)
+        // The car requests the probe page on port 80, which must map to the Web listener.
+        require(!probe || httpMappingPort == 80)
     }
 
     data class Command(val apply: String, val revert: String)
@@ -47,6 +50,19 @@ internal data class RootHttpPlan(val address: String, val port: Int, val downstr
             for (listenerPort in listOfNotNull(port, httpsPort)) {
                 filter("INPUT -i ${downstream.name} -d $address/32 -p tcp --dport $listenerPort -j ACCEPT")
                 filter("OUTPUT -o ${downstream.name} -s $address/32 -d ${downstream.subnet} -p tcp --sport $listenerPort -m conntrack --ctstate ESTABLISHED -j ACCEPT")
+            }
+        }
+        if (probe) {
+            // Redirect every hotspot DNS query, including hardcoded public resolvers, to the
+            // wildcard local responder. Conntrack restores the original destination on the reply.
+            val dnsPort = TeslaWifiProbe.DNS_PORT
+            for (downstream in downstreams) {
+                val gateway = downstream.subnet.substringBefore('/')
+                val rule = "PREROUTING -i ${downstream.name} -p udp --dport 53 " +
+                    "-m comment --comment wheelplay-probe-dns -j DNAT --to-destination $gateway:$dnsPort"
+                add(Command("iptables -w 2 -t nat -I $rule", "iptables -w 2 -t nat -D $rule"))
+                filter("INPUT -i ${downstream.name} -d $gateway/32 -p udp --dport $dnsPort -j ACCEPT")
+                filter("OUTPUT -o ${downstream.name} -s $gateway/32 -d ${downstream.subnet} -p udp --sport $dnsPort -m conntrack --ctstate ESTABLISHED -j ACCEPT")
             }
         }
         mappings().forEach { addAll(it.commands()) }

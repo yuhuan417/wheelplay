@@ -23,49 +23,24 @@ class WebStreamSenderTest {
         override fun awaitTermination(timeout: Long, unit: TimeUnit) = isTerminated
         fun runNext() { tasks.removeFirst().run() }
     }
-    private fun frame(id: Long) = WebSession.Frame(byteArrayOf(id.toByte()), 0, id)
     private fun text(value: String) = WebSocketFrame(WebSocketFrame.OpCode.Text, true, value)
     private fun pcm(sequence: Int, media: Boolean = true) = java.nio.ByteBuffer.allocate(20 + 960 * 2)
         .order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(BrowserAudioBridge.AUDIO_MAGIC).putInt(7)
         .putInt(48_000).putShort(1).putShort(if (media) BrowserAudioBridge.AUDIO_FLAG_MEDIA.toShort() else 0)
         .putInt(sequence).array()
 
-    @Test fun publicationAndAckWakeTheWriterAndSkipSupersededFrames() {
-        val executor = ManualExecutor()
-        var latest: WebSession.Frame? = null
-        val sent = mutableListOf<WebSocketFrame>()
-        var readyNotifications = 0
-        val sender = WebStreamSender({ latest }, { sent.add(it) }, { fail() }, executor, { 100 }, { readyNotifications++ })
-        try {
-            assertTrue(sender.readyForFrame)
-            sender.frameAvailable(); assertTrue(executor.tasks.isEmpty())
-            latest = frame(1); assertFalse("Unsent frame queued means not ready for another encode", sender.readyForFrame)
-            sender.frameAvailable(); executor.runNext()
-            assertFalse("In-flight frame waiting for ACK means not ready for another encode", sender.readyForFrame)
-            assertArrayEquals(byteArrayOf(1), sent.single().binaryPayload)
-            for (id in 2L..100L) { latest = frame(id); sender.frameAvailable() }
-            assertTrue("No polling or per-frame tasks while ACK is outstanding", executor.tasks.isEmpty())
-            sender.acknowledge(); assertEquals(0, readyNotifications); assertEquals(1, executor.tasks.size); executor.runNext()
-            assertArrayEquals(byteArrayOf(100), sent.last().binaryPayload)
-            sender.acknowledge(); assertEquals(1, readyNotifications); assertTrue(sender.readyForFrame); assertTrue(executor.tasks.isEmpty())
-            latest = frame(101); sender.frameAvailable(); executor.runNext()
-            assertEquals(3, sent.size)
-            assertFalse(sender.frameStalled(6100)); assertTrue(sender.frameStalled(6101))
-        } finally { sender.close() }
-    }
-
-    @Test fun controlRepliesCoalesceAndPrecedeTheNextJpeg() {
+    @Test fun controlRepliesCoalesceAndPrecedeTheNextVideoFrame() {
         val executor = ManualExecutor()
         val sent = mutableListOf<WebSocketFrame>()
-        val sender = WebStreamSender({ frame(1) }, { sent.add(it) }, { fail() }, executor, { 0 })
+        val sender = WebStreamSender({ sent.add(it) }, { fail() }, executor, { 0 })
         try {
-            sender.frameAvailable()
+            sender.video(byteArrayOf(1), keyframe = true)
             repeat(100) { sender.control(WebStreamSender.Control.STATUS, text("status-$it")) }
             sender.control(WebStreamSender.Control.INPUT_UNAVAILABLE, text("input"))
-            assertEquals(1, executor.tasks.size)
             executor.runNext()
             assertEquals(listOf("status-99", "input"), sent.take(2).map { it.textPayload })
-            assertEquals(WebSocketFrame.OpCode.Binary, sent.last().opCode)
+            assertEquals(WebSocketFrame.OpCode.Binary, sent[2].opCode)
+            assertArrayEquals(byteArrayOf(1), sent[2].binaryPayload)
             assertTrue(executor.tasks.isEmpty())
         } finally { sender.close() }
     }
@@ -77,10 +52,8 @@ class WebStreamSenderTest {
         val finished = CountDownLatch(3)
         val receiver = Executors.newSingleThreadExecutor()
         val sent = java.util.Collections.synchronizedList(mutableListOf<WebSocketFrame>())
-        val latest = java.util.concurrent.atomic.AtomicReference(frame(1))
         val failures = java.util.concurrent.atomic.AtomicInteger()
         val sender = WebStreamSender(
-            latestFrame = { latest.get() },
             write = {
                 if (it.opCode == WebSocketFrame.OpCode.Binary && it.binaryPayload[0] == 1.toByte()) {
                     enteredWrite.countDown()
@@ -91,10 +64,11 @@ class WebStreamSenderTest {
             onFailure = { failures.incrementAndGet() }, now = { 0 },
         )
         try {
-            sender.frameAvailable(); assertTrue(enteredWrite.await(2, TimeUnit.SECONDS))
+            sender.video(byteArrayOf(1), keyframe = true)
+            assertTrue(enteredWrite.await(2, TimeUnit.SECONDS))
             receiver.execute {
                 repeat(100) { sender.control(WebStreamSender.Control.STATUS, text("status-$it")) }
-                latest.set(frame(2)); sender.frameAvailable(); sender.acknowledge()
+                sender.video(byteArrayOf(2), keyframe = false)
                 eventsAccepted.countDown()
             }
             assertTrue("Reader must not wait for a socket write", eventsAccepted.await(1, TimeUnit.SECONDS))
@@ -108,18 +82,18 @@ class WebStreamSenderTest {
 
     @Test fun closeCancelsQueuedWorkAndIgnoresLateEvents() {
         val executor = ManualExecutor()
-        val sender = WebStreamSender({ frame(1) }, { fail() }, { fail() }, executor, { 0 })
-        sender.frameAvailable(); sender.close()
-        sender.acknowledge(); sender.frameAvailable(); sender.control(WebStreamSender.Control.STATUS, text("late"))
+        val sender = WebStreamSender({ fail() }, { fail() }, executor, { 0 })
+        sender.video(byteArrayOf(1), keyframe = true); sender.close()
+        sender.video(byteArrayOf(2), keyframe = true); sender.control(WebStreamSender.Control.STATUS, text("late"))
         assertTrue(executor.tasks.isEmpty())
     }
 
     @Test fun writeFailureStopsTheWriterAndReportsOnce() {
         val executor = ManualExecutor()
         var failures = 0
-        val sender = WebStreamSender({ frame(1) }, { throw java.io.IOException("closed") }, { failures++ }, executor, { 0 })
-        sender.frameAvailable(); executor.runNext()
-        sender.frameAvailable(); sender.acknowledge()
+        val sender = WebStreamSender({ throw java.io.IOException("closed") }, { failures++ }, executor, { 0 })
+        sender.video(byteArrayOf(1), keyframe = true); executor.runNext()
+        sender.video(byteArrayOf(2), keyframe = true)
         assertEquals(1, failures); assertTrue(executor.tasks.isEmpty())
     }
 
@@ -127,7 +101,7 @@ class WebStreamSenderTest {
         val executor = ManualExecutor()
         val sent = mutableListOf<ByteArray>()
         var time = 0L
-        val sender = WebStreamSender({ null }, { sent.add(it.binaryPayload) }, { fail() }, executor, { time })
+        val sender = WebStreamSender({ sent.add(it.binaryPayload) }, { fail() }, executor, { time })
         try {
             for (id in 1L..30L) sender.audio(byteArrayOf(id.toByte()), id)
             assertEquals(1, executor.tasks.size)
@@ -145,7 +119,7 @@ class WebStreamSenderTest {
     @Test fun stoppingOneAudioStreamRemovesOnlyItsQueuedPcm() {
         val executor = ManualExecutor()
         val sent = mutableListOf<ByteArray>()
-        val sender = WebStreamSender({ null }, { sent.add(it.binaryPayload) }, { fail() }, executor, { 0 })
+        val sender = WebStreamSender({ sent.add(it.binaryPayload) }, { fail() }, executor, { 0 })
         try {
             fun packet(stream: Int) = java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN)
                 .putInt(BrowserAudioBridge.AUDIO_MAGIC).putInt(stream).array()
@@ -159,7 +133,7 @@ class WebStreamSenderTest {
 
     @Test fun mediaBurstSurvivesFourHundredMillisecondWriterDelayWithAOneSecondBuffer() {
         val executor = ManualExecutor(); val sent = mutableListOf<Int>(); var time = 0L
-        val sender = WebStreamSender({ null }, {
+        val sender = WebStreamSender({
             sent.add(java.nio.ByteBuffer.wrap(it.binaryPayload).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(16))
         }, { fail() }, executor, { time })
         try {
@@ -187,7 +161,7 @@ class WebStreamSenderTest {
     @Test fun mediaQueueIsBoundedByPcmDurationForEachSelectedPreset() {
         for (millis in listOf(300, 500, 1000)) {
             val executor = ManualExecutor(); val sent = mutableListOf<Int>()
-            val sender = WebStreamSender({ null }, {
+            val sender = WebStreamSender({
                 sent.add(java.nio.ByteBuffer.wrap(it.binaryPayload).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(16))
             }, { fail() }, executor, { 0 })
             try {
@@ -203,7 +177,7 @@ class WebStreamSenderTest {
     @Test fun stopControlsForDistinctAudioStreamsAreBothDelivered() {
         val executor = ManualExecutor()
         val sent = mutableListOf<String>()
-        val sender = WebStreamSender({ null }, { sent.add(it.textPayload) }, { fail() }, executor, { 0 })
+        val sender = WebStreamSender({ sent.add(it.textPayload) }, { fail() }, executor, { 0 })
         try {
             sender.control(WebStreamSender.Control.AUDIO_STOP, text("one"), key = 1)
             sender.control(WebStreamSender.Control.AUDIO_STOP, text("two"), key = 2)
@@ -217,7 +191,6 @@ class WebStreamSenderTest {
         val sent = mutableListOf<ByteArray>()
         var backlogs = 0
         val sender = WebStreamSender(
-            latestFrame = { null },
             write = { sent.add(it.binaryPayload) },
             onFailure = { fail() },
             executor = executor,
@@ -250,7 +223,6 @@ class WebStreamSenderTest {
         val release = CountDownLatch(1)
         val sent = java.util.Collections.synchronizedList(mutableListOf<ByteArray>())
         val sender = WebStreamSender(
-            latestFrame = { null },
             write = {
                 if (it.binaryPayload[0] == 1.toByte()) { entered.countDown(); release.await(3, TimeUnit.SECONDS) }
                 sent.add(it.binaryPayload)

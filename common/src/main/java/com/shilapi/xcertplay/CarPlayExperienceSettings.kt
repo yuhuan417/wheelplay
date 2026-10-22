@@ -4,20 +4,12 @@ import com.shilapi.xcertplay.airplay.SafeAreaRect
 import kotlin.math.roundToInt
 
 enum class CarPlayAppearance(val label: String) {
-    SYSTEM("跟随 Android"), DAY("始终日间"), NIGHT("始终夜间");
-    fun night(systemNight: Boolean): Boolean = when (this) {
-        SYSTEM -> systemNight
-        DAY -> false
-        NIGHT -> true
-    }
+    DAY("始终日间"), NIGHT("始终夜间");
+    val night: Boolean get() = this == NIGHT
 }
 
 enum class CarPlayMicrophoneSource(val label: String) {
-    ANDROID("Android 麦克风"), BROWSER("浏览器麦克风"), DISABLED("禁用麦克风");
-}
-
-enum class CarPlayAudioOutput(val label: String) {
-    ANDROID("Android 设备"), BROWSER("车机浏览器");
+    BROWSER("浏览器麦克风"), DISABLED("禁用麦克风");
 }
 
 enum class BrowserOfflinePolicy(val label: String, val timeoutMillis: Long?) {

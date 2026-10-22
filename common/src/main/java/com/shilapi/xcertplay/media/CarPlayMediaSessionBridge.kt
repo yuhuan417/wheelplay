@@ -69,7 +69,7 @@ internal class CarPlayMediaSessionBridge(
 
     init {
         session.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
-        session.setPlaybackToLocal(attributes)
+        session.setPlaybackToRemote(fixedVolume)
         installCallbacks()
     }
 
@@ -101,7 +101,7 @@ internal class CarPlayMediaSessionBridge(
         abandonFocus()
         source = next; output = nextOutput
         focusBlocked = false; pausePending = false; ++pauseRequest; remote = false; artwork = null; cover = null
-        session.setPlaybackToLocal(attributes)
+        session.setPlaybackToRemote(fixedVolume)
         apply(NowPlayingState())
         if (next == null) return
         nextOutput?.setLocalMediaRequestedListener {
@@ -114,8 +114,7 @@ internal class CarPlayMediaSessionBridge(
         routeSubscription = nextOutput?.subscribeMediaRoute { isRemote -> main.post {
             if (!closed && epoch == generation && remote != isRemote) {
                 remote = isRemote
-                if (remote) { output?.setLocalMediaAllowed(false); abandonFocus(); session.setPlaybackToRemote(fixedVolume) }
-                else { session.setPlaybackToLocal(attributes); if (state.playing && !pausePending) requestFocus() }
+                output?.setLocalMediaAllowed(false); abandonFocus(); session.setPlaybackToRemote(fixedVolume)
                 render()
             }
         } }
@@ -156,7 +155,7 @@ internal class CarPlayMediaSessionBridge(
         state = next
         if (!state.connected) {
             focusBlocked = false; pausePending = false; ++pauseRequest; remote = false
-            session.setPlaybackToLocal(attributes)
+            session.setPlaybackToRemote(fixedVolume)
             abandonFocus(); output?.setLocalMediaAllowed(false)
         }
         if (state.artwork !== artwork) {
@@ -182,15 +181,9 @@ internal class CarPlayMediaSessionBridge(
     }
 
     private fun requestFocus(): Boolean {
-        if (remote || output?.isRemoteMediaAvailable() == true) {
-            output?.setLocalMediaAllowed(false)
-            return true
-        }
-        if (focusBlocked) return false
-        if (!focused) focused = audio.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-        output?.setLocalMediaAllowed(focused)
-        if (!focused) { focusBlocked = true; source?.sendMediaCommand(MediaCommand.PAUSE, state.connectionGeneration) }
-        return focused
+        // Android never renders CarPlay audio; the media session is only a remote control.
+        output?.setLocalMediaAllowed(false)
+        return true
     }
     private fun abandonFocus() {
         if (focused) audio.abandonAudioFocusRequest(focusRequest)

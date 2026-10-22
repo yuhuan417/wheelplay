@@ -7,11 +7,11 @@
 - `:mobile:assembleDebug`：通过，生成约 40 MB 调试 APK。
 - `:shared:testDebugUnitTest`：196 项通过，0 失败/跳过。
 - `:common:testDebugUnitTest`：45 项通过，0 失败/跳过。
-- 新增测试覆盖：触摸控制权、双指槽位不漂移、非法输入拒绝、长按心跳与超时释放、HTTP 静态资源、配对拒绝、同源校验、真实 TCP/WebSocket ACK 背压、服务停止后端口复用、前台服务移除任务后继续运行、旧媒体代次不覆盖新画面。
+- 新增测试覆盖：触摸控制权、双指槽位不漂移、非法输入拒绝、长按心跳与超时释放、HTTP 静态资源、同源校验、真实 TCP/WebSocket ACK 背压、服务停止后端口复用、前台服务移除任务后继续运行、旧媒体代次不覆盖新画面。
 - `:common:assembleDebugAndroidTest`：通过，设备测试代码编译成功。
 - `:mobile:lintDebug`：0 errors，17 warnings。警告涉及上游/依赖的 TrustManager、未使用资源及原有 HUD 调试界面的国际化文案，未抑制这些警告。
 - `npm test`：4 项浏览器坐标映射测试通过；`npm run check`：通过。
-- 实际浏览器 + 本地协议测试夹具：正确配对、JPEG 彩条显示、触摸按下/抬起消息、错误配对提示、主动断开、再次连接、竖屏及 1280×720 横屏布局。测试画面不是 CarPlay 真机输出。
+- 实际浏览器 + 本地协议测试夹具：打开即连接、WebCodecs 状态、触摸按下/抬起消息、主动断开、再次连接、竖屏及 1280×720 横屏布局。测试画面不是 CarPlay 真机输出。
 - 初始未配置认证资产时的 APK ZIP 检查：包含三项 `assets/web/` 资源，不包含 `.pk8`、`.p7b`、`.jks` 或 `.keystore`。
 - 原版 DiPlay 项目的 Git 工作区保持干净。
 
@@ -30,7 +30,7 @@ Android 模块和 Gradle 配置已迁至项目根目录，原版资料归档至 
 
 ## 未完成的设备验证
 
-初次验证时本机 ADB 无连接设备，已有 AVD 配置引用的 Android 36 系统镜像不存在，模拟器无法启动。后续已连接 Android 设备用于蓝牙诊断，但 **connectedDebugAndroidTest 没有执行**，离屏 EGL → JPEG 的设备级方向/色彩测试目前只有已编译的测试代码。
+初次验证时本机 ADB 无连接设备，已有 AVD 配置引用的 Android 36 系统镜像不存在，模拟器无法启动。后续已连接 Android 设备用于蓝牙诊断，但 **connectedDebugAndroidTest 没有执行**。
 
 本地认证资产现已配置，用户已重新配对并选择 iPhone；仍未验证完整 CarPlay 连接、真实触摸响应、熄屏串流、无线并发、长时间稳定性、温度、带宽或端到端延迟。Robolectric 服务生命周期测试不能代替这些真机验证。
 
@@ -148,7 +148,7 @@ APK 构建成功，7 项 UI 测试通过，其中新增双方向测试验证图�
 
 ## WebRTC 移除（2026-10-19）
 
-目标车机浏览器（Tesla Chrome）不使用 WebRTC 视频直通，已删除 WebRTC/Canvas 显示路径及其原生 libdatachannel 依赖。网页视频仅保留 JPEG 与 WebCodecs 两种模式；JPEG 为默认值。原生库只保留 Mbed TLS，用于 AirPlay 视频帧解密。
+目标车机浏览器（Tesla Chrome）不使用 WebRTC 视频直通，已删除 WebRTC/Canvas 显示路径及其原生 libdatachannel 依赖。网页视频只保留 WebCodecs 一种模式，要求可信 HTTPS 页面。原生库只保留 Mbed TLS，用于 AirPlay 视频帧解密。
 
 ## 首页卡片与连接操作收紧（2026-09-30）
 
@@ -345,4 +345,4 @@ SHA-256：
 - OEM 车厂名称与自定义图标、图片裁剪入口。
 - Android 定位上报与“定位来源”设置。
 
-保留浏览器音频/麦克风链路、WebCodecs、JPEG、Tesla VPN/Root 兼容模式和 ACME/DuckDNS 证书功能。
+保留浏览器音频/麦克风链路、WebCodecs、Tesla Root 兼容模式和 ACME/DuckDNS 证书功能。

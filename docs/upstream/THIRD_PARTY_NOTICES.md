@@ -22,7 +22,6 @@ CarPlay and the CarPlay icon are Apple Inc. marks/assets. This asset is not cove
 
 - AndroidX and Jetpack Compose — Android Open Source Project; Apache License 2.0.
 - Kotlin standard library — JetBrains; Apache License 2.0.
-- Quickie 1.12.0 — Thomas Wirth; MIT License. Its bundled flavor includes the on-device ML Kit barcode model; the Quickie license text is in `docs/QUICKIE-LICENSE.txt`.
 - Bouncy Castle 1.79 — The Legion of the Bouncy Castle Inc.; Bouncy Castle license (MIT-style).
 - JmDNS 3.6.3 — JmDNS contributors; Apache License 2.0.
 - SLF4J — QOS.ch; MIT license.

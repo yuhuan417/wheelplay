@@ -1,7 +1,6 @@
 package com.shilapi.xcertplay.web
 
 import android.content.Intent
-import android.os.ParcelFileDescriptor
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayDisplayConfig
@@ -15,71 +14,12 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import org.robolectric.annotation.Implementation
-import org.robolectric.annotation.Implements
-import org.robolectric.annotation.RealObject
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class TeslaHttpLifecycleTest {
-    class RoutingVpnService : CarPlayVpnService() {
-        fun allocateTeslaTunnel(address: String) = establishTeslaTunnel(address)
-    }
-
-    @Implements(android.net.VpnService.Builder::class)
-    class AllocatingBuilderShadow {
-        @RealObject lateinit var builder: android.net.VpnService.Builder
-        val addresses = mutableListOf<Pair<String, Int>>()
-        val routes = mutableListOf<Pair<String, Int>>()
-        val families = mutableSetOf<Int>()
-        var bypass = false
-        @Implementation fun addAddress(address: String, prefix: Int): android.net.VpnService.Builder {
-            addresses.add(address to prefix); return builder
-        }
-        @Implementation fun addRoute(address: String, prefix: Int): android.net.VpnService.Builder {
-            routes.add(address to prefix); return builder
-        }
-        @Implementation fun allowFamily(family: Int): android.net.VpnService.Builder {
-            families.add(family); return builder
-        }
-        @Implementation fun allowBypass(): android.net.VpnService.Builder { bypass = true; return builder }
-        @Implementation fun establish(): ParcelFileDescriptor {
-            plans.add(this)
-            val pipe = ParcelFileDescriptor.createPipe()
-            peers.add(pipe[1])
-            return pipe[0]
-        }
-        companion object {
-            val plans = mutableListOf<AllocatingBuilderShadow>()
-            val peers = mutableListOf<ParcelFileDescriptor>()
-        }
-    }
-
-    @Test
-    @Config(shadows = [AllocatingBuilderShadow::class])
-    fun teslaBuildersUseOnlyHostRoutesAndAllowBothAddressFamiliesAndBypass() {
-        AllocatingBuilderShadow.plans.clear()
-        val controller = Robolectric.buildService(RoutingVpnService::class.java).create()
-        try {
-            val service = controller.get()
-            for (address in listOf("6.6.6.6", "192.168.229.229")) {
-                service.allocateTeslaTunnel(address).close()
-                val plan = AllocatingBuilderShadow.plans.last()
-                assertEquals(listOf(address to 32), plan.addresses)
-                assertEquals(listOf(address to 32), plan.routes)
-                assertEquals(setOf(android.system.OsConstants.AF_INET, android.system.OsConstants.AF_INET6), plan.families)
-                assertTrue(plan.bypass)
-            }
-        } finally {
-            controller.destroy()
-            AllocatingBuilderShadow.peers.forEach { it.close() }
-            AllocatingBuilderShadow.peers.clear()
-            AllocatingBuilderShadow.plans.clear()
-        }
-    }
-
     @Test fun wirelessAttachDetachAndVpnRevocationNeverAllocateATunnel() {
-        val controller = Robolectric.buildService(RoutingVpnService::class.java).create()
+        val controller = Robolectric.buildService(CarPlayVpnService::class.java).create()
         val service = controller.get()
         try {
             assertEquals(CarPlayVpnService.AttachResult.Started, service.attachWireless(
@@ -90,7 +30,7 @@ class TeslaHttpLifecycleTest {
                 object : AirPlaySessionListener {}, object : AirPlayMediaHandler {}))
             assertTrue(service.isAttached())
             service.onRevoke()
-            assertTrue("Wireless listener is independent of the Tesla VPN", service.isAttached())
+            assertTrue("Wireless listener is independent of VPN revocation", service.isAttached())
             service.detach()
             assertFalse(service.isAttached())
         } finally { controller.destroy() }
@@ -106,7 +46,7 @@ class TeslaHttpLifecycleTest {
     }
 
     @Test fun frameworkVpnBindingUsesTheRevocationBinderAndLocalClientsUseTheLocalBinder() {
-        val controller = Robolectric.buildService(RoutingVpnService::class.java).create()
+        val controller = Robolectric.buildService(CarPlayVpnService::class.java).create()
         try {
             val service = controller.get()
             assertTrue(service.onBind(Intent()) is CarPlayVpnService.LocalBinder)

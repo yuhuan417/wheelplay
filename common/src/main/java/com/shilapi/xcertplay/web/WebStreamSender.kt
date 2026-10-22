@@ -7,14 +7,12 @@ import java.io.Closeable
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-/** One writer, one in-flight JPEG, and coalesced control replies. Never writes under [lock]. */
+/** One writer for control replies, audio, and WebCodecs frames. Never writes under [lock]. */
 internal class WebStreamSender(
-    private val latestFrame: () -> WebSession.Frame?,
     private val write: (WebSocketFrame) -> Unit,
     private val onFailure: () -> Unit,
     private val executor: ExecutorService = Executors.newSingleThreadExecutor(),
     private val now: () -> Long = SystemClock::elapsedRealtime,
-    private val onReadyForFrame: () -> Unit = {},
     /** Called when WebCodecs frames were dropped and only a fresh keyframe can resume the stream. */
     private val onVideoBacklog: () -> Unit = {},
 ) : Closeable {
@@ -25,9 +23,6 @@ internal class WebStreamSender(
     private val controls = linkedMapOf<Any, Outgoing>()
     private var closed = false
     private var scheduled = false
-    private var inFlight = false
-    private var sentAt = 0L
-    private var sequence = -1L
     private data class Audio(val frame: WebSocketFrame, val sequence: Long, val at: Long,
         val stream: Int, val media: Boolean, val durationMillis: Double)
     private val audio = java.util.ArrayDeque<Audio>()
@@ -37,11 +32,6 @@ internal class WebStreamSender(
     private var videoBytes = 0
     private var videoOldestAt = 0L
     private var videoWaitingForKeyframe = false
-
-    val readyForFrame: Boolean
-        get() = synchronized(lock) {
-            !closed && !inFlight && latestFrame()?.let { it.sequence == sequence } != false
-        }
 
     fun configureAudioBuffer(millis: Int) = synchronized(lock) {
         mediaBufferMillis = MediaAudioBuffer.sanitize(millis)
@@ -91,8 +81,6 @@ internal class WebStreamSender(
         }
     }
 
-    fun frameAvailable() = synchronized(lock) { scheduleLocked() }
-
     /** A codec configuration is a control message so it always precedes the frames it describes. */
     fun videoConfig(packet: ByteArray) =
         control(Control.WEBCODECS, WebSocketFrame(WebSocketFrame.OpCode.Binary, true, packet))
@@ -127,15 +115,6 @@ internal class WebStreamSender(
         if (backlog) onVideoBacklog()
     }
 
-    fun acknowledge() {
-        val ready = synchronized(lock) {
-            inFlight = false
-            scheduleLocked()
-            !closed && latestFrame()?.let { it.sequence == sequence } != false
-        }
-        if (ready) onReadyForFrame()
-    }
-
     fun control(kind: Control, frame: WebSocketFrame, key: Any = kind, afterSend: () -> Unit = {}) = synchronized(lock) {
         if (!closed) {
             controls[key] = Outgoing(frame, afterSend)
@@ -144,18 +123,13 @@ internal class WebStreamSender(
     }
 
     fun frameStalled(at: Long): Boolean = synchronized(lock) {
-        inFlight && at - sentAt > 6000 ||
-            audioInFlight.values.firstOrNull()?.let { at - it > 2000 } == true ||
+        audioInFlight.values.firstOrNull()?.let { at - it > 2000 } == true ||
             videoOldestAt > 0 && at - videoOldestAt > 6000
     }
 
     private fun scheduleLocked() {
         if (closed || scheduled) return
-        if (controls.isEmpty() && video.isEmpty() && (audio.isEmpty() || audioInFlight.size >= 4)) {
-            if (inFlight) return
-            val latest = latestFrame() ?: return
-            if (latest.sequence == sequence) return
-        }
+        if (controls.isEmpty() && video.isEmpty() && (audio.isEmpty() || audioInFlight.size >= 4)) return
         scheduled = true
         executor.execute(::drain)
     }
@@ -171,7 +145,11 @@ internal class WebStreamSender(
                         control.value
                     } else if (audio.isNotEmpty() && audioInFlight.size < 4) {
                         audio.removeAll { now() - it.at > audioBudgetMillis(it) }
-                        if (audio.isEmpty()) { scheduled = false; scheduleLocked(); return }
+                        if (audio.isEmpty()) {
+                            scheduled = false
+                            scheduleLocked()
+                            return
+                        }
                         val next = audio.removeFirst()
                         audioInFlight[next.sequence] = now()
                         Outgoing(next.frame)
@@ -181,16 +159,9 @@ internal class WebStreamSender(
                         if (video.isEmpty()) videoOldestAt = 0
                         Outgoing(next.frame)
                     } else {
-                        val frame = if (inFlight) null else latestFrame()?.takeIf { it.sequence != sequence }
-                        if (frame == null) {
-                            // Events use the same lock: none can be lost while the writer goes idle.
-                            scheduled = false
-                            return
-                        }
-                        inFlight = true
-                        sentAt = now()
-                        sequence = frame.sequence
-                        Outgoing(WebSocketFrame(WebSocketFrame.OpCode.Binary, true, frame.jpeg))
+                        // Events use the same lock: none can be lost while the writer goes idle.
+                        scheduled = false
+                        return
                     }
                 }
                 write(outgoing.frame)

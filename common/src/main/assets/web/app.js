@@ -9,32 +9,24 @@ export function mapPoint(clientX, clientY, rect, width, height, clamp = false) {
   return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
 }
 
-export function pairingCodeFromUrl(search) {
-  const match = String(search || '').match(/(?:^|[?&])code=([^&]*)/);
-  let code = '';
-  try { code = match ? decodeURIComponent(match[1].replace(/\+/g, ' ')) : ''; } catch (_) { return null; }
-  return /^[0-9]{6}$/.test(code) ? code : null;
-}
-
 // Keep essential controls until WebSocket accepts them. A successful send is never retried.
 export function createControlOutbox(socket, {
   schedule = setTimeout, cancel = clearTimeout, now = () => Date.now(), onFailure = () => socket.close(),
 } = {}) {
   const touches = [];
   const signals = [];
-  let ack = null, audioAck = null, audioReady = null, ping = null, viewport = null, timer = null, blockedSince = null, closed = false;
+  let audioAck = null, audioReady = null, ping = null, viewport = null, timer = null, blockedSince = null, closed = false;
   const close = () => {
     closed = true; cancel(timer); timer = null;
-    ack = null; audioAck = null; audioReady = null; ping = null; viewport = null; touches.length = 0; signals.length = 0;
+    audioAck = null; audioReady = null; ping = null; viewport = null; touches.length = 0; signals.length = 0;
   };
   const fail = () => { close(); onFailure(); };
   const flush = () => {
     if (closed) return;
     if (socket.readyState !== 1) { close(); return; }
     try {
-      while ((ack || audioAck || audioReady || touches.length || signals.length || viewport || ping) && socket.bufferedAmount < 8192) {
-        if (ack) { socket.send(ack); ack = null; }
-        else if (audioAck) { socket.send(audioAck); audioAck = null; }
+      while ((audioAck || audioReady || touches.length || signals.length || viewport || ping) && socket.bufferedAmount < 8192) {
+        if (audioAck) { socket.send(audioAck); audioAck = null; }
         else if (audioReady) { socket.send(audioReady); audioReady = null; }
         else if (touches.length) { socket.send(touches[0].json); touches.shift(); }
         else if (signals.length) { socket.send(signals[0]); signals.shift(); }
@@ -43,7 +35,7 @@ export function createControlOutbox(socket, {
         blockedSince = null;
       }
     } catch (_) { fail(); return; }
-    if (ack || audioAck || audioReady || touches.length || signals.length || viewport || ping) {
+    if (audioAck || audioReady || touches.length || signals.length || viewport || ping) {
       if (blockedSince === null) blockedSince = now();
       if (now() - blockedSince >= 1500) { fail(); return; }
       if (timer === null) timer = schedule(() => { timer = null; flush(); }, 10);
@@ -51,12 +43,11 @@ export function createControlOutbox(socket, {
       cancel(timer); timer = null; blockedSince = null;
     }
   };
-  const ACK_JSON = '{"type":"ack"}', PING_JSON = '{"type":"ping"}';
+  const PING_JSON = '{"type":"ping"}';
   return {
     send(data, kind = 'edge') {
       if (closed || socket.readyState !== 1) return false;
-      if (data.type === 'ack') ack = ACK_JSON;
-      else if (data.type === 'ping') ping = PING_JSON;
+      if (data.type === 'ping') ping = PING_JSON;
       else {
         const json = JSON.stringify(data);
         if (data.type === 'audio-ack') audioAck = json;
@@ -82,8 +73,8 @@ export function createControlOutbox(socket, {
 }
 
 // The phone forwards CarPlay's H.264/H.265 NAL units over the control WebSocket and the
-// browser decodes them with WebCodecs. The payload rides the same TCP socket as JPEG and
-// audio. WebCodecs is only exposed in a secure context, so this path requires HTTPS.
+// browser decodes them with WebCodecs. The payload shares the socket with audio and control
+// messages. WebCodecs is only exposed in a secure context, so video requires HTTPS.
 export const WEBCODECS_VIDEO_MAGIC = 0x31435657; // "WVC1"
 
 /** Converts Annex B NAL units to the 4-byte length framing WebCodecs uses with avcC/hvcC. */
@@ -384,31 +375,21 @@ import { createBrowserAudio } from './browser-audio.js';
 
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
-  // JPEG frames are decoded into the idle buffer and swapped in only once the decode resolves.
-  // Reassigning the single visible element's src blanks it while the JPEG decodes, which reads
-  // as a flicker at frame rate on car hardware. `screen` always names the visible buffer.
-  let screen = $('screen');
-  let spare = $('screen-next');
-  const canvas = $('video-canvas');
   const wcCanvas = $('wc-canvas');
   const display = $('display');
   const touchSurface = $('touch-surface');
-  // Read-only diagnostic snapshots; counters never include pairing credentials or video payloads.
+  // Read-only diagnostic snapshots; counters never include video payloads.
   const performanceStats = { source: null, transport: null };
   Object.defineProperty(window, 'wheelplayStats', { configurable: true, get: () => JSON.parse(JSON.stringify(performanceStats)) });
   let webCodecs = null, webCodecsRequested = false, webCodecsHttpsNotified = false, webCodecsUnsupportedSent = false;
   let webCodecsError = null, webCodecsStopTimer = null;
-  // JPEG must not paint over a working WebCodecs picture.
   function videoTransportActive() {
     return Boolean(webCodecs && webCodecs.active);
   }
-  let socket = null, stopped = true, paired = false, retry = null, attempts = 0;
-  let width = 1280, height = 720, live = false, objectUrl = null, lastFrame = 0, lastStatus = 0;
+  let socket = null, stopped = true, retry = null, attempts = 0;
+  let width = 1280, height = 720, live = false, lastFrame = 0, lastStatus = 0;
   let heartbeat = null, moveRaf = null, moveDirty = false, moveGeneration = 0, outbox = null;
-  let authGeneration = 0, deviceCredential = null, storageAvailable = false;
   let launchPresentation = null;
-  const devicePreference = 'wheelplay.browserDevice';
-  let pairingToken = null, qrGeneration = 0, qrTimer = null, qrRequest = null, resumeTimer = null;
   let viewportReportTimer = null, lastViewportSignature = '';
   const hideToolbarOption = $('hide-toolbar');
   const hideToolbarPreference = 'wheelplay.hideToolbar';
@@ -416,166 +397,6 @@ if (typeof document !== 'undefined') {
   hideToolbarOption.addEventListener('change', () => {
     try { window.localStorage.setItem(hideToolbarPreference, String(hideToolbarOption.checked)); } catch (_) {}
   });
-  const pairApi = async (path, request = null) => {
-    const headers = request?.token ? { 'X-Pair-Token': request.token } :
-      request?.code ? { 'X-Pair-Code': request.code } :
-      request?.device ? { 'X-Device-Id': request.device.id, 'X-Device-Secret': request.device.secret } :
-      request ? { 'X-Pair-Id': request.id, 'X-Pair-Secret': request.secret } : {};
-    const controller = typeof AbortController === 'undefined' ? null : new AbortController();
-    const timeout = setTimeout(() => controller && controller.abort(), 8000);
-    try {
-      const response = await fetch(`/pair/${path}`, { method: 'POST', headers, cache: 'no-store',
-        keepalive: path === 'cancel' || path === 'revoke', ...(controller ? { signal: controller.signal } : {}) });
-      if (!response.ok) {
-        const error = new Error(response.status === 404 ? 'expired' : 'unavailable');
-        error.status = response.status; throw error;
-      }
-      return await response.json();
-    } finally { clearTimeout(timeout); }
-  };
-  try {
-    const stored = window.localStorage.getItem(devicePreference);
-    storageAvailable = true;
-    if (stored) {
-      const device = JSON.parse(stored);
-      if (typeof device.id === 'string' && typeof device.secret === 'string' && device.id.length === 32 && device.secret.length === 32) deviceCredential = device;
-    }
-  } catch (_) {}
-  function showPairingReady(name = '浏览器已配对') {
-    $('remembered-device').hidden = false;
-    $('device-name').textContent = name;
-    $('qr-pairing').hidden = true; $('pair-instructions').hidden = true;
-    $('code-entry').hidden = true; $('code').required = false; $('code').disabled = true;
-    $('connect-label').textContent = '启动显示';
-    $('connect').disabled = false;
-    $('status').textContent = '已配对 · 等待启动'; $('message').textContent = '';
-  }
-  function showPairingEntry() {
-    $('remembered-device').hidden = true;
-    $('qr-pairing').hidden = false; $('pair-instructions').hidden = false;
-    $('code-entry').hidden = false; $('code').required = true; $('code').disabled = false;
-    $('connect-label').textContent = '配对并启动显示';
-    $('connect').disabled = false;
-  }
-  async function preparePairing(token, generation) {
-    pairingToken = token;
-    let name = '浏览器已配对';
-    let message = '已配对。选择上方选项后，点击「启动显示」。';
-    if (storageAvailable) {
-      try {
-        const device = await pairApi('remember', { token });
-        if (generation !== authGeneration) return;
-        deviceCredential = device;
-        window.localStorage.setItem(devicePreference, JSON.stringify(device));
-        name = device.name;
-      } catch (_) {
-        message = '本次配对成功，但未能记住设备。下次可能需要重新配对；可检查浏览器存储或 App 中的设备数量。';
-      }
-    } else message = '本次配对成功。浏览器无法保存设备，下次仍需配对。';
-    if (generation !== authGeneration) return;
-    showPairingReady(name); $('device-status').textContent = message;
-  }
-  async function initializePairing(linkedCode = null, autoConnect = true) {
-    const generation = ++authGeneration;
-    clearTimeout(resumeTimer); resumeTimer = null;
-    stopQr(); pairingToken = null;
-    showPairingEntry(); $('connect').disabled = true;
-    if (deviceCredential) {
-      $('status').textContent = '正在恢复配对…';
-      try {
-        const result = await pairApi('resume', { device: deviceCredential });
-        if (generation !== authGeneration) return;
-        pairingToken = result.token;
-        showPairingReady(result.name);
-        if (autoConnect) {
-          $('device-status').textContent = '已自动恢复配对，正在启动显示…';
-          stopped = false; attempts = 0; connect();
-        } else {
-          $('device-status').textContent = '已自动恢复配对。选择上方选项后，点击「启动显示」。';
-        }
-        return;
-      } catch (error) {
-        if (generation !== authGeneration) return;
-        if (error.status === 401) {
-          deviceCredential = null;
-          try { window.localStorage.removeItem(devicePreference); } catch (_) {}
-          $('message').textContent = '设备记忆已失效或已被移除，请重新配对。';
-        } else {
-          showPairingReady(deviceCredential.name || '已记住的浏览器');
-          $('status').textContent = '等待恢复配对 · 正在自动重试';
-          $('device-status').textContent = '暂时无法恢复配对，正在自动重试；也可点击「启动显示」立即重试。';
-          resumeTimer = setTimeout(() => {
-            if (generation === authGeneration) initializePairing(linkedCode, autoConnect);
-          }, 2000);
-          return;
-        }
-      }
-    }
-    if (linkedCode) {
-      $('code').value = linkedCode;
-      try {
-        const result = await pairApi('code', { code: linkedCode });
-        if (generation !== authGeneration) return;
-        await preparePairing(result.token, generation); return;
-      } catch (_) {
-        if (generation !== authGeneration) return;
-        $('message').textContent = '访问链接中的配对码已失效，请重新扫码或输入当前配对码。';
-      }
-    }
-    if (generation !== authGeneration) return;
-    showPairingEntry(); $('status').textContent = '等待配对'; startQr();
-  }
-  function stopQr(cancel = true) {
-    qrGeneration++; clearTimeout(qrTimer);
-    if (cancel && qrRequest) pairApi('cancel', qrRequest).catch(() => {});
-    qrRequest = null;
-    $('pair-qr').onload = null; $('pair-qr').onerror = null;
-    $('pair-qr').hidden = true; $('pair-qr').removeAttribute('src');
-  }
-  async function startQr() {
-    stopQr(); const generation = qrGeneration;
-    $('qr-status').textContent = '正在生成二维码…';
-    $('refresh-qr').disabled = true;
-    try {
-      const request = await pairApi('request');
-      if (generation !== qrGeneration) { pairApi('cancel', request).catch(() => {}); return; }
-      qrRequest = request;
-      $('pair-qr').onload = () => {
-        if (generation === qrGeneration) $('pair-qr').hidden = false;
-      };
-      $('pair-qr').onerror = () => {
-        if (generation !== qrGeneration) return;
-        $('pair-qr').hidden = true;
-        $('qr-status').textContent = '二维码加载失败，请刷新重试或手动输入配对码。';
-      };
-      $('pair-qr').src = `/pair/qr?id=${encodeURIComponent(request.id)}&secret=${encodeURIComponent(request.secret)}`;
-      $('qr-status').textContent = '请用服务端 App 扫码并允许连接。二维码两分钟内有效。';
-      const expiresAt = Date.now() + request.expiresIn * 1000;
-      const poll = async () => {
-        try {
-          if (generation !== qrGeneration) return;
-          if (Date.now() >= expiresAt) throw new Error('expired');
-          const result = await pairApi('status', request);
-          if (generation !== qrGeneration) return;
-          if (result.state === 'approved') {
-            stopQr(false); $('connect').disabled = true;
-            await preparePairing(result.token, ++authGeneration); return;
-          }
-          qrTimer = setTimeout(poll, 1000);
-        } catch (error) {
-          if (generation !== qrGeneration) return;
-          stopQr();
-          $('qr-status').textContent = error.message === 'expired' ? '二维码已过期，请刷新后重新扫描。' : '暂时无法获取配对状态，请刷新二维码或输入配对码。';
-        }
-      };
-      qrTimer = setTimeout(poll, 1000);
-    } catch (_) {
-      if (generation === qrGeneration) $('qr-status').textContent = '二维码暂不可用，请刷新重试或手动输入配对码。';
-    } finally {
-      if (generation === qrGeneration) $('refresh-qr').disabled = false;
-    }
-  }
-  $('refresh-qr').addEventListener('click', startQr);
   const pointers = new Map();
   const send = (data, kind) => outbox ? outbox.send(data, kind) : false;
   const browserAudio = createBrowserAudio({
@@ -666,14 +487,12 @@ if (typeof document !== 'undefined') {
   function release() { cancelMove(); pointers.clear(); send({ type: 'touch', contacts: [] }); }
   const statusElement = $('status');
   const waitingElement = $('waiting');
-  // Called once per decoded JPEG frame, so it must not touch the DOM while the state is unchanged.
-  // Both JPEG buffers carry the class so a swap never reveals an unstyled element.
+  // Called on every transport state change, so it must not touch the DOM while unchanged.
+  // The WebCodecs canvas and the touch overlay both carry the stale class.
   function setLive(value) {
     if (live === value) return;
     live = value;
-    screen.classList.toggle('stale', !value);
-    spare.classList.toggle('stale', !value);
-    canvas.classList.toggle('stale', !value);
+    wcCanvas.classList.toggle('stale', !value);
     touchSurface.classList.toggle('stale', !value);
     waitingElement.hidden = value;
     if (!display.hidden) {
@@ -693,131 +512,8 @@ if (typeof document !== 'undefined') {
     lastStatusText = text;
     statusHeldUntil = holdMillis > 0 ? now + holdMillis : 0;
   }
-  let jpegContext = null, jpegDecoding = false, pendingJpeg = null, jpegGeneration = 0, jpegRendered = false;
-  let jpegRaf = null, stagedBitmap = null, stagedSocket = null;
-  function closeBitmap(bitmap) {
-    if (bitmap && typeof bitmap.close === 'function') bitmap.close();
-  }
-  function paintJpegBitmap(ws, bitmap) {
-    const frameWidth = bitmap.width || width, frameHeight = bitmap.height || height;
-    if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
-      canvas.width = frameWidth;
-      canvas.height = frameHeight;
-      jpegContext.imageSmoothingEnabled = false;
-    }
-    jpegContext.drawImage(bitmap, 0, 0, frameWidth, frameHeight);
-    closeBitmap(bitmap);
-    canvas.hidden = false;
-    screen.hidden = true;
-    spare.hidden = true;
-    jpegRendered = true;
-    lastFrame = Date.now();
-    width = frameWidth;
-    height = frameHeight;
-    setLive(true);
-    setStatus('JPEG · 触控已连接');
-  }
-  function scheduleJpegVsyncGate() {
-    if (jpegRaf !== null || typeof requestAnimationFrame !== 'function') return;
-    const rafToken = jpegGeneration;
-    jpegRaf = requestAnimationFrame(() => {
-      jpegRaf = null;
-      if (rafToken !== jpegGeneration || !stagedBitmap) return;
-      const nextBitmap = stagedBitmap, nextWs = stagedSocket;
-      stagedBitmap = null;
-      stagedSocket = null;
-      if (socket !== nextWs || nextWs.readyState !== WebSocket.OPEN || videoTransportActive()) {
-        closeBitmap(nextBitmap);
-        return;
-      }
-      try {
-        paintJpegBitmap(nextWs, nextBitmap);
-        scheduleJpegVsyncGate();
-      } catch (_) {
-        closeBitmap(nextBitmap);
-        stopJpegPipeline(true);
-        if (socket === nextWs) nextWs.close();
-      }
-    });
-  }
-  function stopJpegPipeline(hideSurface = false) {
-    jpegGeneration++;
-    jpegDecoding = false;
-    pendingJpeg = null;
-    if (jpegRaf !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(jpegRaf);
-    jpegRaf = null;
-    closeBitmap(stagedBitmap);
-    stagedBitmap = null;
-    stagedSocket = null;
-    if (hideSurface && jpegRendered) {
-      jpegRendered = false;
-      canvas.hidden = true;
-      canvas.width = canvas.height = 0;
-      jpegContext = null;
-    }
-  }
-  function decodeJpegCanvas(ws, payload) {
-    jpegDecoding = true;
-    const token = jpegGeneration;
-    // 1-Frame Pipelining: acknowledge as soon as the decoder takes the frame while the pending
-    // slot is empty, overlapping network delivery of the next frame with off-thread decoding.
-    send({ type: 'ack' });
-    const source = payload instanceof ArrayBuffer && typeof Blob !== 'undefined' ? new Blob([payload], { type: 'image/jpeg' }) : payload;
-    Promise.resolve(createImageBitmap(source)).then(bitmap => {
-      if (token !== jpegGeneration || socket !== ws || ws.readyState !== WebSocket.OPEN || videoTransportActive()) {
-        closeBitmap(bitmap);
-        if (pendingJpeg !== null && socket === ws && ws.readyState === WebSocket.OPEN) send({ type: 'ack' });
-        jpegDecoding = false;
-        pendingJpeg = null;
-        return;
-      }
-      try {
-        if (jpegRaf !== null && typeof requestAnimationFrame === 'function') {
-          closeBitmap(stagedBitmap);
-          stagedBitmap = bitmap;
-          stagedSocket = ws;
-        } else {
-          paintJpegBitmap(ws, bitmap);
-          scheduleJpegVsyncGate();
-        }
-      } catch (_) {
-        closeBitmap(bitmap);
-        stopJpegPipeline(true);
-        if (socket === ws) ws.close();
-        return;
-      }
-      if (pendingJpeg !== null && socket === ws && ws.readyState === WebSocket.OPEN && !videoTransportActive()) {
-        const next = pendingJpeg;
-        pendingJpeg = null;
-        decodeJpegCanvas(ws, next);
-      } else {
-        jpegDecoding = false;
-        pendingJpeg = null;
-      }
-    }, () => {
-      if (token !== jpegGeneration || socket !== ws) return;
-      stopJpegPipeline(true);
-      ws.close();
-    });
-  }
-  function cleanupImage() {
-    stopJpegPipeline(true);
-    jpegContext = null;
-    for (const buffer of [screen, spare]) {
-      buffer.onload = null; buffer.onerror = null;
-      buffer.removeAttribute('src'); buffer.hidden = true;
-    }
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-    objectUrl = null;
-  }
   function hideWebCodecsSurface() {
     wcCanvas.hidden = true;
-    if (jpegRendered) {
-      canvas.hidden = false;
-      screen.hidden = true;
-    } else if (screen.complete && screen.naturalWidth > 0) {
-      screen.hidden = false;
-    }
   }
   // A reconfiguration briefly stops the decoder. Keep the last decoded frame on screen while
   // the replacement config/keyframe arrives; only hide the surface if it really stays stopped.
@@ -831,19 +527,16 @@ if (typeof document !== 'undefined') {
       }
     }, 3000);
   }
-  // WebCodecs is selected explicitly: on failure keep the error visible and do not fall back.
+  // There is no fallback transport: keep the failure visible so the cause can be fixed.
   function webCodecsFailed(reason) {
     if (webCodecs) webCodecs.close();
     webCodecsRequested = false;
     webCodecsError = reason;
     wcCanvas.hidden = true;
-    canvas.hidden = true;
-    screen.hidden = true;
-    spare.hidden = true;
     setLive(false);
     $('stage').textContent = `WebCodecs 失败：${reason}`;
     $('waiting').hidden = false;
-    setStatus(`WebCodecs 失败 · 已停止（不回退 JPEG）：${reason}`, 60000);
+    setStatus(`WebCodecs 失败 · 已停止：${reason}`, 60000);
   }
   function cleanupVideoTransports() {
     clearTimeout(webCodecsStopTimer); webCodecsStopTimer = null;
@@ -852,13 +545,6 @@ if (typeof document !== 'undefined') {
     webCodecsError = null;
     wcCanvas.hidden = true;
     performanceStats.source = performanceStats.transport = null;
-    if (jpegRendered) {
-      canvas.hidden = false;
-      screen.hidden = true;
-    } else {
-      canvas.hidden = true;
-      screen.hidden = !(screen.complete && screen.naturalWidth > 0);
-    }
   }
   function exitLaunchFullscreen() {
     try { Promise.resolve(document.exitFullscreen()).catch(() => {}); } catch (_) {}
@@ -869,7 +555,7 @@ if (typeof document !== 'undefined') {
     if (!presentation.immersive || document.fullscreenElement || !document.documentElement?.requestFullscreen) return;
     presentation.ownsFullscreen = true;
     try {
-      // Keep the request in the submit gesture, before asynchronous pairing or WebSocket setup.
+      // Keep the request in the submit gesture, before WebSocket setup.
       Promise.resolve(document.documentElement.requestFullscreen()).then(() => {
         if (presentation.cancelled && !launchPresentation?.immersive && document.fullscreenElement) exitLaunchFullscreen();
       }).catch(() => { presentation.ownsFullscreen = false; });
@@ -881,30 +567,24 @@ if (typeof document !== 'undefined') {
     launchPresentation.immersive = false;
     if (launchPresentation.ownsFullscreen && document.fullscreenElement) exitLaunchFullscreen();
   }
-  function disconnect(refreshQr = true, autoConnect = false) {
-    clearTimeout(resumeTimer); resumeTimer = null;
-    stopQr();
-    authGeneration++;
+  function disconnect() {
     restoreLaunchPresentation();
-    stopped = true; paired = false; release();
+    stopped = true; release();
     if (outbox) { outbox.close(); outbox = null; }
     clearTimeout(retry); clearInterval(heartbeat);
     if (socket) { const old = socket; socket = null; old.close(); }
-    cleanupVideoTransports(); cleanupImage(); setLive(false);
+    cleanupVideoTransports(); setLive(false);
     browserAudio.close(); $('audio-message').hidden = true;
     $('topbar').hidden = false; $('pairing').hidden = false; $('display').hidden = true;
     invalidateDisplayRect();
     $('disconnect').hidden = true; $('connect').disabled = false;
     $('status').textContent = '已断开';
-    if (refreshQr) initializePairing(null, autoConnect);
   }
   function connect() {
-    clearTimeout(resumeTimer); resumeTimer = null;
     clearTimeout(retry);
     $('connect').disabled = true;
-    $('status').textContent = paired ? '正在重新连接…' : '正在连接…';
-    const auth = pairingToken ? `token=${encodeURIComponent(pairingToken)}` : `code=${encodeURIComponent($('code').value)}`;
-    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stream?${auth}`);
+    $('status').textContent = '正在连接…';
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stream`);
     ws.binaryType = 'arraybuffer';
     socket = ws;
     const connectTimer = setTimeout(() => ws.close(), 8000);
@@ -916,7 +596,7 @@ if (typeof document !== 'undefined') {
         if (socket !== ws) return;
         cancelMove(); pointers.clear(); setLive(false); ws.close();
       } });
-      paired = true; attempts = 0; lastStatus = Date.now();
+      attempts = 0; lastStatus = Date.now();
       browserAudio.attach();
       cleanupVideoTransports();
       webCodecs = createWebCodecsReceiver(wcCanvas, { send,
@@ -924,11 +604,6 @@ if (typeof document !== 'undefined') {
           if (socket !== ws) return;
           clearTimeout(webCodecsStopTimer); webCodecsStopTimer = null;
           webCodecsError = null;
-          // The decoder has painted its first frame; JPEG can stop for this viewer.
-          stopJpegPipeline(false);
-          jpegRendered = false;
-          jpegContext = null;
-          canvas.hidden = true; screen.hidden = true; spare.hidden = true;
           wcCanvas.hidden = false;
           setLive(true);
           send({ type: 'webcodecs-ready' });
@@ -990,7 +665,7 @@ if (typeof document !== 'undefined') {
         }
         if (data.type === 'status') {
           performanceStats.source = data.performance?.source ?? null;
-          performanceStats.transport = data.performance?.transport ?? null;
+          performanceStats.transport = data.transport ?? null;
           lastStatus = Date.now(); width = data.width; height = data.height;
           $('stage').textContent = data.stage || '等待 iPhone 画面…';
           if (data.webCodecsNeedsHttps && !webCodecsHttpsNotified) {
@@ -1019,17 +694,15 @@ if (typeof document !== 'undefined') {
           if (!data.webCodecsAvailable) webCodecsRequested = false;
           const recentWebCodecsFrame = webCodecs !== null && lastFrame > 0 &&
             Date.now() - lastFrame < 3000 && webCodecsError === null;
-          setLive(Boolean(data.streaming &&
-            (webCodecs?.active || lastFrame && (jpegRendered || screen.naturalWidth))) ||
-            recentWebCodecsFrame);
+          setLive(Boolean(data.streaming || recentWebCodecsFrame));
           if (!live && !data.streaming) {
             $('topbar').hidden = Boolean(launchPresentation?.immersive);
           }
           const transport = webCodecsError
-            ? 'WebCodecs 失败（不回退 JPEG）'
+            ? 'WebCodecs 失败'
             : webCodecs?.active
               ? `${webCodecs.codec === 'H265' ? 'HEVC' : 'H.264'} / WebCodecs`
-              : 'JPEG';
+              : 'WebCodecs';
           setStatus(live ? `${transport} · 触控已连接` : '已连接 · 等待 iPhone 画面');
         }
         if (data.type === 'input-unavailable') setStatus('等待 iPhone 触控通道就绪');
@@ -1037,120 +710,37 @@ if (typeof document !== 'undefined') {
       }
       if (browserAudio.receive(event.data)) return;
       if (webCodecs && webCodecs.receive(event.data)) return;
-      if (videoTransportActive()) { send({ type: 'ack' }); return; }
-      if (typeof createImageBitmap === 'function') {
-        if (!jpegContext) {
-          try {
-            jpegContext = canvas.getContext('2d', { alpha: false, desynchronized: true }) || canvas.getContext('2d', { alpha: false });
-          } catch (_) {
-            try { jpegContext = canvas.getContext('2d'); } catch (_) { jpegContext = null; }
-          }
-          if (jpegContext) jpegContext.imageSmoothingEnabled = false;
-        }
-        if (jpegContext) {
-          if (jpegDecoding) {
-            pendingJpeg = event.data;
-            return;
-          }
-          decodeJpegCanvas(ws, event.data);
-          return;
-        }
-      }
-      // Fallback for browsers without createImageBitmap: load into the idle buffer and swap only
-      // once it has loaded, so the visible element always holds a paintable frame.
-      const displayedUrl = objectUrl;
-      const nextUrl = URL.createObjectURL(event.data instanceof ArrayBuffer && typeof Blob !== 'undefined' ? new Blob([event.data], { type: 'image/jpeg' }) : event.data);
-      objectUrl = nextUrl;
-      const target = spare;
-      target.onload = () => {
-        target.onload = null; target.onerror = null;
-        if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
-        if (videoTransportActive()) { send({ type: 'ack' }); return; }
-        target.hidden = false;
-        screen.hidden = true; screen.removeAttribute('src');
-        spare = screen; screen = target;
-        lastFrame = Date.now(); width = screen.naturalWidth; height = screen.naturalHeight;
-        setLive(true);
-        setStatus('JPEG · 触控已连接');
-        send({ type: 'ack' });
-        if (displayedUrl) URL.revokeObjectURL(displayedUrl);
-      };
-      target.onerror = () => {
-        target.onload = null; target.onerror = null;
-        if (socket === ws) { screen.hidden = true; ws.close(); }
-      };
-      target.src = nextUrl;
+      // WebCodecs is the only binary video transport; unmatched payloads are ignored.
     };
     ws.onclose = () => {
       clearTimeout(connectTimer);
       if (socket !== ws) return;
       if (outbox) { outbox.close(); outbox = null; }
       cancelMove();
-      socket = null; pointers.clear(); clearInterval(heartbeat); cleanupVideoTransports(); cleanupImage(); setLive(false);
+      socket = null; pointers.clear(); clearInterval(heartbeat); cleanupVideoTransports(); setLive(false);
       browserAudio.close(); $('audio-message').hidden = true;
       if (stopped) return;
-      if (!deviceCredential && (!paired || ++attempts > 8)) {
+      if (++attempts > 8) {
         disconnect(); $('status').textContent = '连接未成功';
-        $('message').textContent = '请检查服务端是否运行、配对码是否正确。连续输错后请等待 30 秒再试。';
+        $('message').textContent = '请检查服务端是否运行，以及车机与手机是否在同一局域网。';
         return;
       }
-      if (deviceCredential) attempts++;
       $('status').textContent = '连接中断 · 正在重试';
       $('stage').textContent = '检查服务端与车机是否仍在同一局域网。';
-      const generation = authGeneration;
-      retry = setTimeout(async () => {
-        if (deviceCredential) {
-          try {
-            const result = await pairApi('resume', { device: deviceCredential });
-            if (stopped || generation !== authGeneration) return;
-            pairingToken = result.token;
-          } catch (error) {
-            if (stopped || generation !== authGeneration) return;
-            if (error.status === 401) { disconnect(); return; }
-          }
-        }
-        if (!stopped && generation === authGeneration) connect();
-      }, Math.min(8000, 500 * 2 ** Math.min(attempts, 5)));
+      retry = setTimeout(() => { if (!stopped) connect(); },
+        Math.min(8000, 500 * 2 ** Math.min(attempts, 5)));
     };
     ws.onerror = () => {}; // onclose owns retry and visible error state.
   }
   $('connect-form').addEventListener('submit', event => {
     event.preventDefault();
-    const generation = ++authGeneration;
-    clearTimeout(resumeTimer); resumeTimer = null;
     prepareLaunchPresentation();
-    stopQr(); $('connect').disabled = true; $('message').textContent = '';
-    const start = () => { if (generation === authGeneration) { stopped = false; attempts = 0; connect(); } };
-    if (pairingToken && !deviceCredential) { start(); return; }
-    (async () => {
-      try {
-        if (deviceCredential) {
-          const result = await pairApi('resume', { device: deviceCredential });
-          if (generation !== authGeneration) return;
-          pairingToken = result.token;
-        } else {
-          const result = await pairApi('code', { code: $('code').value });
-          if (generation !== authGeneration) return;
-          await preparePairing(result.token, generation);
-        }
-        start();
-      } catch (error) {
-        if (generation !== authGeneration) return;
-        restoreLaunchPresentation();
-        $('connect').disabled = false;
-        if (error.status === 401 && deviceCredential) {
-          pairingToken = null; deviceCredential = null;
-          try { window.localStorage.removeItem(devicePreference); } catch (_) {}
-          showPairingEntry(); startQr();
-        }
-        $('status').textContent = '配对未成功';
-        $('message').textContent = '请检查服务和网络，或重新扫码 / 输入当前配对码。连续输错后请等待 30 秒再试。';
-      }
-    })();
+    $('connect').disabled = true; $('message').textContent = '';
+    stopped = false; attempts = 0; connect();
   });
   $('phone-connect').addEventListener('click', () => {
-    if (!paired || !send({ type: 'phone-connect' })) {
-      $('phone-connect-message').textContent = '浏览器连接已中断，请重新配对后再试。';
+    if (!socket || socket.readyState !== WebSocket.OPEN || !send({ type: 'phone-connect' })) {
+      $('phone-connect-message').textContent = '浏览器连接已中断，请重新连接后再试。';
       return;
     }
     $('phone-connect').disabled = true;
@@ -1174,7 +764,7 @@ if (typeof document !== 'undefined') {
     scheduleViewportReport();
   });
   // A separate layer prevents Android Chrome's native video gestures cancelling drags.
-  for (const surface of [screen, spare, canvas, touchSurface]) {
+  for (const surface of [wcCanvas, touchSurface]) {
   surface.addEventListener('contextmenu', event => event.preventDefault());
   surface.addEventListener('pointerdown', event => {
     if (!live || pointers.size >= 2 || (event.pointerType === 'mouse' && event.button !== 0)) return;
@@ -1212,13 +802,5 @@ if (typeof document !== 'undefined') {
   }
   window.addEventListener('blur', release);
   document.addEventListener('visibilitychange', () => { if (document.hidden) release(); });
-  window.addEventListener('pagehide', () => disconnect(false));
-  window.addEventListener('pageshow', event => { if (event.persisted) initializePairing(); });
-  const linkedCode = pairingCodeFromUrl(window.location?.search || '');
-  if (linkedCode) {
-    $('code').value = linkedCode;
-    // Keep the short-lived code out of copied URLs and browser history entries.
-    window.history?.replaceState(null, '', `${window.location.pathname}${window.location.hash}`);
-  }
-  initializePairing(linkedCode);
+  window.addEventListener('pagehide', () => disconnect());
 }

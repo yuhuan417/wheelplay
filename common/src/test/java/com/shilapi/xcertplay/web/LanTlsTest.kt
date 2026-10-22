@@ -101,12 +101,10 @@ class LanTlsTest {
         WebSession.start(context)
         try {
             waitForHttps()
-            val code = WebSession.code
             LanTls.preparePem(pem(*identity.chain.toTypedArray()), pem(identity.keys.private)).use { prepared ->
                 assertNull(WebSession.installCertificate(context, prepared))
                 assertTrue(WebSession.tls!!.custom)
-                assertEquals(code, WebSession.code)
-                assertTrue(httpsGet(WebSession.httpsPort).contains("设备上的六位配对码"))
+                assertTrue(httpsGet(WebSession.httpsPort).contains("WheelPlay"))
                 assertTrue(LanTls.hasCustom(context))
                 val fingerprint = WebSession.tls!!.fingerprint
                 WebSession.stop(); WebSession.start(context); waitForHttps()
@@ -175,7 +173,6 @@ class LanTlsTest {
         WebSession.start(context)
         try {
             waitForHttps()
-            val code = WebSession.code
             val http = WebSession.httpPort
             val https = WebSession.httpsPort
             assertNotNull(WebSession.setHttpPort(context, 80))
@@ -183,7 +180,6 @@ class LanTlsTest {
             assertEquals(http, WebSession.httpPort)
             assertEquals(https, WebSession.httpsPort)
             assertFalse(RootAccess.granted)
-            assertEquals(code, WebSession.code)
             assertTrue(URL("http://127.0.0.1:$http/").readText().contains("WheelPlay"))
             assertTrue(httpsGet(https).contains("WheelPlay"))
         } finally { WebSession.stop() }
@@ -199,7 +195,6 @@ class LanTlsTest {
                 assertNull(WebSession.installCertificate(context, it))
             }
             val fingerprint = WebSession.tls!!.fingerprint
-            val code = WebSession.code
             val https = WebSession.httpsPort
             val config = com.shilapi.xcertplay.network.TeslaHttpConfig(enabled = true)
             val interfaces = listOf(HttpDownstream("ap0", 12, "192.168.43.1/24"))
@@ -210,7 +205,6 @@ class LanTlsTest {
             assertNull(WebSession.httpsListenerPort)
             assertTrue(LanTls.hasCustom(context))
             assertTrue(WebSession.running)
-            assertEquals(code, WebSession.code)
             ServerSocket(https).use { assertEquals(https, it.localPort) }
             val after = TeslaHttpCompatibility.plan(config, interfaces, WebSession.httpListenerPort, WebSession.httpsListenerPort, true)!!
             assertEquals(80, after.httpMappingPort)
@@ -233,13 +227,11 @@ class LanTlsTest {
         assertNull(WebSession.setHttpsEnabled(context, false))
         WebSession.start(context)
         try {
-            val code = WebSession.code
             ServerSocket(0).use { occupied ->
                 assertNull(WebSession.setHttpsPort(context, occupied.localPort))
                 assertNotNull(WebSession.setHttpsEnabled(context, true))
                 assertFalse(WebListenSettings.httpsEnabled(context))
                 assertFalse(WebSession.httpsReady)
-                assertEquals(code, WebSession.code)
                 assertTrue(URL("http://127.0.0.1:${WebSession.httpPort}/").readText().contains("WheelPlay"))
             }
             assertNull(WebSession.setHttpsEnabled(context, true))
@@ -254,7 +246,6 @@ class LanTlsTest {
         try {
             waitForHttps()
             val oldPort = WebSession.httpsPort
-            val code = WebSession.code
             val fingerprint = WebSession.tls!!.fingerprint
             ServerSocket(0).use { occupied ->
                 assertNotNull(WebSession.setHttpsPort(context, occupied.localPort))
@@ -266,7 +257,6 @@ class LanTlsTest {
             val port = ServerSocket(0).use { it.localPort }
             assertNull(WebSession.setHttpsPort(context, port))
             assertEquals(port, WebListenSettings.httpsPort(context))
-            assertEquals(code, WebSession.code)
             assertEquals(fingerprint, WebSession.tls!!.fingerprint)
             assertTrue(httpsGet(port).contains("WheelPlay"))
             val info = org.json.JSONObject(URL("http://127.0.0.1:${WebSession.httpPort}/tls.json").readText())

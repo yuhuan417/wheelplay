@@ -1,7 +1,6 @@
 package com.shilapi.xcertplay
 
 import com.shilapi.xcertplay.web.WebSession
-import com.shilapi.xcertplay.web.OffscreenVideoOutput
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -151,13 +150,6 @@ class CarPlayHostActivity : ComponentActivity() {
             updateHotspotStatusBlock()
             maybeStartCarPlay()
         }
-    private val microphonePermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            microphoneAvailable = granted
-            microphonePermissionResolved = true
-            appendLog(if (granted) "Microphone permission granted" else "Microphone permission denied")
-            requestStartupPrerequisites()
-        }
     private var videoView: TextureView? = null
     private var gestureOverlay: View? = null
     private var settingsMenu: View? = null
@@ -191,14 +183,11 @@ class CarPlayHostActivity : ComponentActivity() {
     private var displayDiagnosticAttempt: String? = null
     private var hevcEnabled = true
     private var hevcSoftwareDecoderEnabled = false
-    private var advancedAudioChannelMappingSupported = false
-    private var advancedAudioChannelMapping = false
     private var disableAudioOutput = false
     private var debugLogsEnabled = false
     private var autoStartOnBoot = false
     private var model = AirPlayPersistence.DEFAULT_MODEL
     private var fps = AirPlayDisplaySettings.DEFAULT_FPS
-    private var streamTechnology = com.shilapi.xcertplay.web.StreamTechnology.JPEG
     private var widthPhysicalMm = AirPlayDisplaySettings.DEFAULT_WIDTH_PHYSICAL_MM
     private var physicalSizeBasis = AirPlayDisplaySettings.DEFAULT_PHYSICAL_SIZE_BASIS
     private var maximumDetectedWidthPixels = 0
@@ -206,9 +195,6 @@ class CarPlayHostActivity : ComponentActivity() {
     private var rightHandDrive = false
     private var safeAreaDrawOutside = true
     private var locationPermissionAvailable = false
-    private var microphoneAvailable = false
-    private var microphonePermissionResolved = false
-    private var microphoneSource = CarPlayMicrophoneSource.ANDROID
     private var wirelessPermissionsReady = false
     private var manualHotspotChannelPermissionAsked = false
     private var manualHotspotChannelPermissionNote: String? = null
@@ -302,8 +288,6 @@ class CarPlayHostActivity : ComponentActivity() {
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         initializeSessionLog()
         darkMode = isDarkMode(resources.configuration.uiMode)
-        advancedAudioChannelMappingSupported =
-            resources.getBoolean(R.bool.config_advanced_audio_channel_mapping)
         airPlayIdentity = AirPlayPersistence.loadIdentity(this)
         loadPersistedSettings()
         locationPermissionAvailable = hasFineLocationPermission()
@@ -330,22 +314,14 @@ class CarPlayHostActivity : ComponentActivity() {
             "Host started; MFi provider=local offline; transport=wireless",
         )
         val reusedBackgroundSession = adoptBackgroundSession()
-        microphoneAvailable =
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        microphonePermissionResolved = microphoneAvailable
         if (reusedBackgroundSession) {
             updateDebugOverlays()
-        } else if (AirPlayPersistence.loadMicrophoneSource(this) == CarPlayMicrophoneSource.DISABLED ||
-            microphonePermissionResolved || WebSession.audio.microphoneRequested) {
-            microphonePermissionResolved = true
-            requestStartupPrerequisites()
         } else {
-            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+            requestStartupPrerequisites()
         }
     }
 
     private fun loadPersistedSettings() {
-        microphoneSource = AirPlayPersistence.loadMicrophoneSource(this)
         displayScaleTenths = AirPlayPersistence.loadDisplayScaleTenths(this)
         // Size is now chosen only through CarPlaySize; ignore the canvas scale older builds stored.
         uiScalePercent = CarPlayUiScale.DEFAULT
@@ -353,15 +329,11 @@ class CarPlayHostActivity : ComponentActivity() {
         hevcSoftwareDecoderEnabled =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                 AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
-        advancedAudioChannelMapping =
-            advancedAudioChannelMappingSupported &&
-                AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
         disableAudioOutput = AirPlayPersistence.loadDisableAudioOutput(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
         autoStartOnBoot = AirPlayPersistence.loadAutoStartOnBoot(this)
         model = AirPlayPersistence.loadModel(this)
         fps = AirPlayPersistence.loadFps(this)
-        streamTechnology = AirPlayPersistence.loadStreamTechnology(this)
         widthPhysicalMm = AirPlayPersistence.loadWidthPhysicalMm(this)
         physicalSizeBasis = AirPlayPersistence.loadPhysicalSizeBasis(this)
         AirPlayPersistence.loadMaximumDetectedDisplay(this).let { (width, height) ->
@@ -475,16 +447,6 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (!isFinishing && controller == null && !menuOpen) {
-                val selectedMicrophone = AirPlayPersistence.loadMicrophoneSource(this)
-            if (microphoneSource != selectedMicrophone) {
-                microphoneSource = selectedMicrophone
-                microphonePermissionResolved = selectedMicrophone == CarPlayMicrophoneSource.DISABLED ||
-                    checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED ||
-                    WebSession.audio.microphoneRequested
-                if (!microphonePermissionResolved) microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
-            }
-        }
         locationPermissionAvailable = hasFineLocationPermission()
         if (locationPermissionAvailable) {
             manualHotspotChannelPermissionNote = null
@@ -642,7 +604,7 @@ class CarPlayHostActivity : ComponentActivity() {
             settingsSwitchRow(
                 label = "CarPlay video only (iPhone audio)",
                 checked = disableAudioOutput,
-                description = "Do not advertise CarPlay audio output; route iPhone audio over its own Bluetooth connection",
+                description = "Do not advertise CarPlay audio or microphone; route iPhone audio and calls over its own Bluetooth connection",
             ) { checked ->
                 disableAudioOutput = checked
                 appendLog(
@@ -656,26 +618,6 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
         )
-        if (advancedAudioChannelMappingSupported) {
-            content.addView(
-                settingsSwitchRow(
-                    label = "Advanced audio channel mapping",
-                    checked = advancedAudioChannelMapping,
-                    description = "Route AAOS audio buses by CarPlay audio type",
-                ) { checked ->
-                    advancedAudioChannelMapping = checked
-                    appendLog(
-                        "Advanced audio channel mapping ${if (checked) "enabled" else "disabled"}; " +
-                            "applies when settings close",
-                    )
-                    updateResolutionMenu()
-                },
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(12) },
-            )
-        }
 
         content.addView(
             settingsCategoryHeader("Identity & appearance"),
@@ -844,16 +786,9 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(16) },
         )
 
-        content.addView(settingsChoiceRow(
-            label = "Streaming technology",
-            options = com.shilapi.xcertplay.web.StreamTechnology.entries.map { it to it.label },
-            selected = streamTechnology,
-        ) { streamTechnology = it }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
-        content.addView(menuText("JPEG works in any browser. WebCodecs forwards the compressed H.264 / HEVC stream over the control WebSocket: it needs the HTTPS page and a browser with WebCodecs (Tesla Chrome 113+); H.265 also needs HEVC decode support. Set Frame rate to 60 for 60 fps. Changes take effect after closing settings.", 14f, MENU_SECONDARY),
+        content.addView(menuText("Video arrives as the compressed H.264 / HEVC stream over the control WebSocket and is decoded by the browser with WebCodecs. It needs the HTTPS page and a browser with WebCodecs (Tesla Chrome 113+); H.265 also needs HEVC decode support. Set Frame rate to 60 for 60 fps. Changes take effect after closing settings.", 14f, MENU_SECONDARY),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(8); bottomMargin = dp(16) })
+                .apply { topMargin = dp(24); bottomMargin = dp(16) })
 
         val hevcRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1102,11 +1037,9 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveManualHotspotChannel(this, manualHotspotChannel)
         AirPlayPersistence.saveManualHotspotSecurity(this, manualHotspotSecurity)
         AirPlayPersistence.saveAutoStartOnBoot(this, autoStartOnBoot)
-        AirPlayPersistence.saveAdvancedAudioChannelMapping(this, advancedAudioChannelMapping)
         AirPlayPersistence.saveDisableAudioOutput(this, disableAudioOutput)
         AirPlayPersistence.saveDisplayScaleTenths(this, displayScaleTenths)
         AirPlayPersistence.saveFps(this, fps)
-        AirPlayPersistence.saveStreamTechnology(this, streamTechnology)
         AirPlayPersistence.saveWidthPhysicalMm(this, widthPhysicalMm)
         AirPlayPersistence.savePhysicalSizeBasis(this, physicalSizeBasis)
         AirPlayPersistence.saveHevcEnabled(this, hevcEnabled)
@@ -1834,13 +1767,6 @@ class CarPlayHostActivity : ComponentActivity() {
             }
             append("Driving side: ").append(if (rightHandDrive) "right" else "left").append('\n')
             append("Video transport: ").append(transport).append('\n')
-            append("Location reporting: ")
-                .append('\n')
-            if (advancedAudioChannelMappingSupported) {
-                append("Audio channel mapping: ")
-                    .append(if (advancedAudioChannelMapping) "AAOS buses" else "Mobile compatible")
-                    .append('\n')
-            }
             append(safeAreaSummary())
         }
     }
@@ -1945,7 +1871,7 @@ class CarPlayHostActivity : ComponentActivity() {
             rightHandDrive = rightHandDrive,
             hevc = hevcEnabled,
             disableAudioOutput = disableAudioOutput,
-            microphone = AirPlayPersistence.loadMicrophoneSource(this) != CarPlayMicrophoneSource.DISABLED,
+            microphone = AirPlayPersistence.loadMicrophoneSource(this) == CarPlayMicrophoneSource.BROWSER,
             manufacturer = AirPlayPersistence.DEFAULT_MANUFACTURER_NAME,
             model = normalizedModel(),
             oemLabel = AirPlayPersistence.DEFAULT_MANUFACTURER_NAME,
@@ -2078,20 +2004,15 @@ class CarPlayHostActivity : ComponentActivity() {
         // Capture this session's log: late decoder shutdown must not write into a new session.
         val diagnosticLog = sessionLog
         val videoGeneration = WebSession.beginVideo(videoWidth, videoHeight)
-        val source = com.shilapi.xcertplay.web.WebVideoSource(streamTechnology, videoWidth, videoHeight)
-        val output = OffscreenVideoOutput(videoWidth, videoHeight,
-            wanted = { WebSession.jpegReady && source.jpegNeeded },
-            publish = { WebSession.publish(videoGeneration, it) })
-        WebSession.attachVideoSource(videoGeneration, source, output::requestResume)
+        val source = com.shilapi.xcertplay.web.WebVideoSource(videoWidth, videoHeight)
+        WebSession.attachVideoSource(videoGeneration, source)
         return AndroidMediaSink(
-            surface = output.surface,
             encodedVideo = source,
             remoteAudio = WebSession.audio.createRoute(),
-            onClosed = { output.close(); WebSession.endVideo(videoGeneration) },
+            onClosed = { WebSession.endVideo(videoGeneration) },
             videoWidth = videoWidth,
             videoHeight = videoHeight,
             preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
-            advancedAudioChannelMapping = advancedAudioChannelMapping,
             onScreenStreamActiveChanged = { type, active ->
                 onScreenStreamStateChanged(controllerGeneration, type, active)
             },
@@ -2105,7 +2026,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun createMediaEngine(sink: AndroidMediaSink): CarPlayMediaEngine =
         CarPlayMediaEngine(
             sink = sink,
-            microphoneEnabled = AirPlayPersistence.loadMicrophoneSource(this) != CarPlayMicrophoneSource.DISABLED,
+            microphoneEnabled = AirPlayPersistence.loadMicrophoneSource(this) == CarPlayMicrophoneSource.BROWSER,
             audioCaptureDirectory = audioCaptureDirectory(),
         )
 
@@ -2497,7 +2418,6 @@ class CarPlayHostActivity : ComponentActivity() {
         val transportReady = wirelessPermissionsReady
         if (
             !transportReady ||
-            !microphonePermissionResolved ||
             shuttingDown.get() ||
             menuOpen ||
             handshakeResetInProgress ||

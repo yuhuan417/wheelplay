@@ -26,7 +26,6 @@ object AirPlayPersistence {
     private const val KEY_UI_SCALE_PERCENT = "ui_scale_percent"
     private const val KEY_HEVC_ENABLED = "hevc_enabled"
     private const val KEY_HEVC_SOFTWARE_DECODER = "hevc_software_decoder"
-    private const val KEY_ADVANCED_AUDIO_CHANNEL_MAPPING = "advanced_audio_channel_mapping"
     private const val KEY_MANUAL_HOTSPOT_SSID = "manual_hotspot_ssid"
     private const val KEY_MANUAL_HOTSPOT_PASSPHRASE = "manual_hotspot_passphrase"
     private const val KEY_MANUAL_HOTSPOT_BAND = "manual_hotspot_band"
@@ -37,7 +36,6 @@ object AirPlayPersistence {
     private const val KEY_DEBUG_LOGS_ENABLED = "debug_logs_enabled"
     private const val KEY_MODEL = "model"
     private const val KEY_FPS = "display_fps"
-    private const val KEY_STREAM_TECHNOLOGY = "web_stream_technology"
     private const val KEY_MEDIA_BUFFER_MS = "media_buffer_ms"
     private const val KEY_WIDTH_PHYSICAL_MM = "display_width_physical_mm"
     private const val KEY_PHYSICAL_SIZE_BASIS = "display_physical_size_basis"
@@ -47,7 +45,6 @@ object AirPlayPersistence {
     private const val KEY_HIDE_TOP_BAR = "hide_top_bar"
     private const val KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar"
     private const val KEY_ADAPTIVE_BROWSER_SIZE = "adaptive_browser_size"
-    private const val KEY_BROWSER_AUDIO_PLAYBACK = "browser_audio_playback"
     private const val KEY_DISABLE_AUDIO_OUTPUT = "disable_audio_output"
     private const val KEY_BROWSER_MICROPHONE = "browser_microphone"
     private const val KEY_MICROPHONE_SOURCE = "microphone_source"
@@ -61,14 +58,6 @@ object AirPlayPersistence {
     const val DEFAULT_MODEL = "WheelPlay"
     const val DEFAULT_MANUFACTURER_NAME = "NIO"
 
-    fun loadBrowserAudioPlayback(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_BROWSER_AUDIO_PLAYBACK, false)
-
-    fun saveBrowserAudioPlayback(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_BROWSER_AUDIO_PLAYBACK, enabled).apply()
-    }
-
     fun loadDisableAudioOutput(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_DISABLE_AUDIO_OUTPUT, false)
@@ -78,27 +67,27 @@ object AirPlayPersistence {
             .putBoolean(KEY_DISABLE_AUDIO_OUTPUT, enabled).apply()
     }
 
-    fun loadBrowserMicrophone(context: Context): Boolean = loadMicrophoneSource(context) == CarPlayMicrophoneSource.BROWSER
-
-    fun saveBrowserMicrophone(context: Context, enabled: Boolean) {
-        saveMicrophoneSource(context, if (enabled) CarPlayMicrophoneSource.BROWSER else CarPlayMicrophoneSource.ANDROID)
-    }
-
     fun loadMicrophoneSource(context: Context): CarPlayMicrophoneSource {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        return CarPlayMicrophoneSource.entries.firstOrNull { it.name == prefs.getString(KEY_MICROPHONE_SOURCE, null) }
-            ?: if (prefs.getBoolean(KEY_BROWSER_MICROPHONE, false)) CarPlayMicrophoneSource.BROWSER else CarPlayMicrophoneSource.ANDROID
+        return when {
+            prefs.getString(KEY_MICROPHONE_SOURCE, null) == CarPlayMicrophoneSource.BROWSER.name ->
+                CarPlayMicrophoneSource.BROWSER
+            prefs.getString(KEY_MICROPHONE_SOURCE, null) == CarPlayMicrophoneSource.DISABLED.name ->
+                CarPlayMicrophoneSource.DISABLED
+            // Migrate the removed Android-microphone and legacy browser-microphone preferences.
+            prefs.getBoolean(KEY_BROWSER_MICROPHONE, false) -> CarPlayMicrophoneSource.BROWSER
+            else -> CarPlayMicrophoneSource.DISABLED
+        }
     }
 
     fun saveMicrophoneSource(context: Context, source: CarPlayMicrophoneSource) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_MICROPHONE_SOURCE, source.name)
-            .putBoolean(KEY_BROWSER_MICROPHONE, source == CarPlayMicrophoneSource.BROWSER).apply()
+            .putString(KEY_MICROPHONE_SOURCE, source.name).apply()
     }
 
     fun loadAppearance(context: Context): CarPlayAppearance = CarPlayAppearance.entries.firstOrNull {
         it.name == context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_APPEARANCE, null)
-    } ?: CarPlayAppearance.SYSTEM
+    } ?: CarPlayAppearance.DAY
     fun saveAppearance(context: Context, value: CarPlayAppearance) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_APPEARANCE, value.name).apply()
     }
@@ -154,16 +143,6 @@ object AirPlayPersistence {
     fun saveHevcSoftwareDecoderEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_HEVC_SOFTWARE_DECODER, enabled)
-            .apply()
-    }
-
-    fun loadAdvancedAudioChannelMapping(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_ADVANCED_AUDIO_CHANNEL_MAPPING, false)
-
-    fun saveAdvancedAudioChannelMapping(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_ADVANCED_AUDIO_CHANNEL_MAPPING, enabled)
             .apply()
     }
 
@@ -277,16 +256,6 @@ object AirPlayPersistence {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getInt(KEY_FPS, 30),
     )
-
-    fun loadStreamTechnology(context: Context): com.shilapi.xcertplay.web.StreamTechnology {
-        val value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_STREAM_TECHNOLOGY, null)
-        return com.shilapi.xcertplay.web.StreamTechnology.entries.firstOrNull { it.name == value }
-            ?: com.shilapi.xcertplay.web.StreamTechnology.JPEG
-    }
-
-    fun saveStreamTechnology(context: Context, value: com.shilapi.xcertplay.web.StreamTechnology) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_STREAM_TECHNOLOGY, value.name).apply()
-    }
 
     fun loadMediaBufferMillis(context: Context): Int = com.shilapi.xcertplay.media.MediaAudioBuffer.sanitize(
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

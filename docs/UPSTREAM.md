@@ -4,7 +4,7 @@
 - 上游提交：`eae4e7babafb91f2768687061b5f22515b8cf444`
 - 初始源码复制方式：仅复制 Git 已跟踪的 `mobile`、`common`、`shared`、Gradle 配置及许可证/文档；未复制构建产物、Git 元数据、认证资产、签名文件或 local.properties。
 - 原版目录保持不变。
-- 本分支修改：APK 包名/启动入口、前台服务及服务面板、离屏渲染输出、内嵌网页、网络协议和测试；构建基线调整为已安装的 SDK 36 / AGP 9.1.0 / Gradle 9.3.1。
+- 本分支修改：APK 包名/启动入口、前台服务及服务面板、WebCodecs 视频转发、内嵌网页、网络协议和测试；构建基线调整为已安装的 SDK 36 / AGP 9.1.0 / Gradle 9.3.1。
 - 原版文档作为来源记录保留在 `docs/upstream`，其「安装到车机」、版本号、SDK 37 和 HUD 工作流不代表本分支用法；本分支以根目录 README 为准。
 
 ## 当前目录布局
@@ -24,10 +24,6 @@ Android Gradle 工程已提升至项目根目录：`mobile/`、`common/`、`shar
 Material Components for Android 1.13.0（Apache-2.0），使用官方 Material 3 主题与控件。[底部导航开发文档](https://github.com/material-components/material-components-android/blob/master/docs/components/BottomNavigation.md)。本机 `.local/maven/` 仅为下载连接受限时的本地缓存，依赖来自 Google Maven / Maven Central，不提交到仓库。
 
 
-## 离线二维码
-
-扫码使用 [Quickie 1.12.0](https://github.com/G00fY2/quickie)，基于 CameraX 与 ML Kit，采用 bundled flavor，将识别模型随应用打包，因此扫码不依赖 Google Play 服务或网络下载。Quickie 使用 MIT 许可，见 [QUICKIE-LICENSE.txt](QUICKIE-LICENSE.txt)。本地生成配对二维码仍使用 [ZXing Core 3.5.3](https://github.com/zxing/zxing)（Apache-2.0）；依赖均来自 Maven Central。
-
 本地 HTTPS 证书签发使用 [Bouncy Castle PKIX](https://www.bouncycastle.org/download/bouncy-castle-java/)；[许可证](https://github.com/bcgit/bc-java/blob/main/LICENSE.md) 基于 MIT。证书私钥在应用本地生成并保存在私有非备份目录，不包含在仓库或 APK 中。
 
 
@@ -45,8 +41,6 @@ Material Components for Android 1.13.0（Apache-2.0），使用官方 Material 3
 | 启动 Tab · `ic_server_launch` | [play_circle_filled](https://github.com/google/material-design-icons/blob/master/src/av/play_circle_filled/materialicons/24px.svg) |
 | 车机访问卡片、服务通知 · `ic_server_server` / `ic_diplay_notification` | [cast](https://github.com/google/material-design-icons/blob/master/src/hardware/cast/materialicons/24px.svg) |
 | iPhone Tab、会话和状态卡片 · `ic_server_phone` | [phone_iphone](https://github.com/google/material-design-icons/blob/master/src/hardware/phone_iphone/materialicons/24px.svg) |
-| 扫描二维码配对按钮 · `ic_server_scan` | [qr_code_scanner](https://github.com/google/material-design-icons/blob/master/src/communication/qr_code_scanner/materialicons/24px.svg) |
-| 浏览器配对卡片 · `ic_server_qr` | [qr_code_2](https://github.com/google/material-design-icons/blob/master/src/communication/qr_code_2/materialicons/24px.svg) |
 | 无线连接卡片 · `ic_server_wifi` | [wifi](https://github.com/google/material-design-icons/blob/master/src/notification/wifi/materialicons/24px.svg) |
 | 设置 Tab · `ic_server_settings` | [settings](https://github.com/google/material-design-icons/blob/master/src/action/settings/materialicons/24px.svg) |
 | 设置选择器、其他地址展开箭头 · `ic_settings_chevron` | [chevron_right](https://github.com/google/material-design-icons/blob/master/src/navigation/chevron_right/materialicons/24px.svg) |
@@ -57,7 +51,7 @@ Material Components for Android 1.13.0（Apache-2.0），使用官方 Material 3
 | 媒体通知下一首 · `ic_media_skip_next` | [skip_next](https://github.com/google/material-design-icons/blob/master/src/av/skip_next/materialicons/24px.svg) |
 | 连接通知停止服务 · `ic_media_stop` | [stop](https://github.com/google/material-design-icons/blob/master/src/av/stop/materialicons/24px.svg) |
 
-启动使用播放圆形图标，车机访问及服务通知使用投屏图标。通知采用白色遮罩；页面图标跟随 Material 主题、卡片颜色和导航选中状态。方向箭头保留展开旋转动画，设置选择器支持 RTL 镜像。NIO 返回入口与原有应用品牌位图不属于自绘功能图标；二维码矩阵、裁剪网格及安全区域辅助线是功能内容，不作图标替换。
+启动使用播放圆形图标，车机访问及服务通知使用投屏图标。通知采用白色遮罩；页面图标跟随 Material 主题、卡片颜色和导航选中状态。方向箭头保留展开旋转动画，设置选择器支持 RTL 镜像。NIO 返回入口与原有应用品牌位图不属于自绘功能图标；裁剪网格及安全区域辅助线是功能内容，不作图标替换。
 
 ## VPN Hotspot Root 路由适配
 
@@ -67,7 +61,7 @@ Material Components for Android 1.13.0（Apache-2.0），使用官方 Material 3
 - `mobile/src/main/java/be/mygod/vpnhotspot/util/RootSession.kt`：成功安装后保存逆序撤销命令、异常回滚及服务停止后撤销。
 - `mobile/src/main/java/be/mygod/vpnhotspot/net/TetheringManager.kt`：系统热点状态广播及 `tetherArray` 字段。
 
-修改集中于 `RootHttpRouting.kt` 和 `TeslaHttpCompatibility.kt`：将上游的通用 VPN 上网共享收窄为 WheelPlay 本地 HTTP 入口，通过 Root 分配 loopback `/32` 共享地址、安装局部投递及回程路由；Root shell 持有规则事务，App 管道关闭后撤销。未复制上游 App、UI、DNS 代理、客户端数据库或 Rust daemon，不提供通用 VPN Internet 转发。Tesla 模式不占用 VPN；有线 CarPlay 继续使用原有 IPv6 VPN。
+修改集中于 `RootHttpRouting.kt` 和 `TeslaHttpCompatibility.kt`：将上游的通用 VPN 上网共享收窄为 WheelPlay 本地 HTTP 入口，通过 Root 分配 loopback `/32` 共享地址、安装局部投递及回程路由；Root shell 持有规则事务，App 管道关闭后撤销。未复制上游 App、UI、DNS 代理、客户端数据库或 Rust daemon，不提供通用 VPN Internet 转发。Tesla 模式不占用 VPN；无线 CarPlay 直接绑定本机热点地址。
 
 热点下游采用 [AOSP RouteController](https://android.googlesource.com/platform/system/netd/+/refs/heads/main/server/RouteController.cpp) 的 `local_network`（97）路由表；上游 `1000 + ifindex` 的物理上网接口表不适用于热点下游。
 

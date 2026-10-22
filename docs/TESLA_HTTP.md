@@ -2,74 +2,64 @@
 
 此模式主要用于帮助**屏蔽私有网段访问的车机浏览器**绕过地址限制，通过兼容访问地址连接手机上的本地服务。功能名称沿用「Tesla 兼容」，也适用于有同类限制的其他品牌车机；具体可用性仍需在目标车机上验证。
 
-提供 **免 Root VPN（实验）** 与 **Root 热点路由** 两种可选方案，都默认关闭。切换方案会关闭当前模式，需重新主动启用；各自的地址设置独立保存。系统热点的 IP 和 DHCP 网段保持不变。
-
-## 免 Root VPN 使用
-
-1. 先导入有效认证资源并启动 Web 服务，在 Android 上开启**系统热点**，让 Tesla 连接该热点。
-2. 在「设置 → Tesla 兼容（实验）→ 连接方案」选择「免 Root VPN（实验）」，开启模式并接受 Android VPN 授权。无需 Root 或 Shizuku，不执行 `su`、`ip`、`iptables`。后台启动和轮询不会弹授权；拒绝授权后保持关闭，撤销授权后请点击「授权或重试 VPN」。
-3. 等待「免 Root 地址已配置」，访问 `http://6.6.6.6:8080`，并完成现有浏览器配对。实际端口取自「Web 监听」，无 `80` / `443` 映射。访问 IP 可修改，不能等于兼容接口地址 `192.168.229.229`。DuckDNS 域名与自动证书也在此区域配置，并共用该访问 IP。
-4. 启用模式或修改 IP 会直接重建地址资源；无线 CarPlay 不依赖 VPN，不受影响。关闭免 Root 模式只清理其 IPv4 资源。
-5. 可选 HTTPS 使用实际 HTTPS 监听端口，证书需覆盖 IP / 域名并由车机信任。IP 或域名变化会刷新默认本地证书；域名仍需自行配置 DNS。Origin 改变后需重新配对。
-
-### 实现与生命周期
-
-- 通过公开的 `VpnService.Builder` 创建 `6.6.6.6/32` 地址及同目标 `/32` 路由，允许 IPv4 / IPv6 与 bypass；同时持有原 FD 和 `dup()` 的副本。再创建 `192.168.229.229/32` 兼容 TUN，使第一个接口不再是活动 VPN。两者都不启动包读写线程，也不提供互联网 VPN 转发。
-- 与无线 CarPlay 共用**同一个** `CarPlayVpnService`，但 AirPlay 监听不使用 VPN。VPN 槽位只承载 Tesla 的 IPv4 地址接口和兼容 TUN。
-- Web 服务独立绑定 VPN 服务，因此无需连接 iPhone 即可保活地址；CarPlay 的解绑不会销毁仍被 Web 持有的服务。关闭模式、停止 Web 服务、销毁 VPN 服务或收到 `onRevoke()` 时关闭相关 FD。撤销授权不会自动重建；创建失败、复制 FD 失败或地址消失后撤下入口并等待手动重试。失败不阻止普通 Web 监听或无线 CarPlay 启动。
-- 本机检测会包含 DOWN 接口，但**不证明热点请求和回包可达**。长期保留旧 TUN 超出了 Android 文档所保证的切换生命周期，依赖系统保留 IPv4 地址及本地路由的实现行为；不同 ROM、热点防火墙和系统更新可能影响结果。占用同一用户的 VPN 槽位，不能承诺与第三方 VPN 共存。服务由 Web / CarPlay 管理，不支持系统 Always-on VPN。
-- `6.6.6.6` 是公网地址形式。在正常本地投递路径下，请求和回包留在热点局域网，无公网服务器；地址或路由失效时客户端可能将请求发往上游，不能据地址配置状态承诺任何情况下都留在局域网。
-- 读取 TUN 本身不会自动建立转发或改变路由。此实现不给 IPv4 TUN 配置读写桥。
-
-### 免 Root 验证范围
-
-自动回归测试覆盖地址接口和兼容接口的建立顺序、两份 FD 保留、停用／停止／撤销时清理、部分创建失败回滚、手动重试、Web 独立绑定，以及设置中的授权接受／拒绝和方案切换。测试使用模拟 TUN，不验证 Android 内核的实际地址和路由保留行为。
-
-仍需在 Android 手机与 Tesla 上验证：
-
-1. 另一台热点客户端能打开页面，完成配对并持续使用 WebSocket、JPEG、触控与音频。
-2. Tesla 可访问相同完整 URL；记录手机型号、Android / ROM 版本、Tesla 固件版本及是否被强制 HTTPS。
-3. 多次连接／断开／重连无线 CarPlay，核对 Web 页面不受影响。
-4. 热点关闭／重开、前后台、Web 端口变更、停止服务、关闭模式、强制停止 App、拒绝／撤销 VPN 授权后，确认入口状态和 FD / 地址清理。
-5. WebCodecs 需要 HTTPS 页面和浏览器支持；不满足时保持 JPEG 模式。
+只提供 **Root 热点路由** 方案，默认关闭。需要已 Root 的设备以及可用的 `su`、`ip`、`iptables`；不需要 Android VPN 授权，也不占用 VPN 槽位。系统热点的 IP 和 DHCP 网段保持不变。
 
 ## Root 热点路由
 
-此方案通过内置的 [VPN Hotspot](https://github.com/Mygod/VPNHotspot) Root 路由适配，让车机从 Android 热点访问 WheelPlay 的本地共享 IPv4 地址。需要已 Root 的设备以及可用的 `su`、`ip`、`iptables`；无需另外安装 VPN Hotspot。
+此方案通过内置的 [VPN Hotspot](https://github.com/Mygod/VPNHotspot) Root 路由适配，让车机从 Android 热点访问 WheelPlay 的本地共享 IPv4 地址。无需另外安装 VPN Hotspot。
 
 ## Root 热点路由使用
 
 1. 在运行 WheelPlay 的 Android 设备上开启系统热点，让车机连接这个热点。
-2. 在「连接方案」选择 Root 热点路由，点击「请求 Root 权限」，在 Magisk 等 Root 管理器中授予 **WheelPlay** 权限。已启用 Root 模式时，App 启动会在后台检查一次 Root；默认关闭或免 Root 模式不会请求 Root。检查成功后才显示其余设置，再打开「启用 Tesla 兼容」。拒绝授权后不会自动重复请求，可在「设置 → Tesla 兼容（实验）」中点击「请求 Root 权限」重试。按钮可独立于热点和 Web 服务使用；此模式不申请 Android VPN 授权。
+2. 在「设置 → Tesla 兼容（实验）」点击「请求 Root 权限」，在 Magisk 等 Root 管理器中授予 **WheelPlay** 权限。已启用此模式时，App 启动会在后台检查一次 Root；关闭时不会请求 Root。检查成功后才显示其余设置，再打开「启用 Tesla 兼容」。拒绝授权后不会自动重复请求，可再次点击「请求 Root 权限」重试。按钮可独立于热点和 Web 服务使用；此模式不申请 Android VPN 授权。
 3. 默认共享 IP 是 `100.96.0.1`，可改为一般 IPv4 单播地址，包括私有或公网地址；回环、多播、链路本地及未指定地址不可用。避免与移动网络、其他 VPN 或局域网冲突。
 4. 映射 HTTP 端口默认 `80`，映射 HTTPS 端口默认 `443`，有效范围为 `1–1023`，两者不能相同。它们通过 Root 映射到「Web 监听」中的实际端口（默认 `8080` / `8443`），只作用于配置的访问 IP。HTTPS 映射仅在 Web HTTPS 开启且监听成功时安装。
-5. 等待「Root 热点路由已启用」，在车机浏览器输入 `http://100.96.0.1/` 并配对；HTTPS 默认入口是 `https://100.96.0.1/`，仍需车机信任证书。拒绝 Root、缺少命令、端口占用或规则安装失败时，App 不展示已就绪的共享入口。修复后点击「重新启动 Root 路由」；不会持续重复申请 Root。
-6. 普通 HTTP 端口、Web 域名及可选 HTTPS 在「设置 → Web 监听」中配置，无需 Root。自备域名需配置 DNS A 记录，解析到实际访问 IP；填写域名不自动配置 DNS。映射端口不是 `80` 时使用 `http://你的域名:映射端口/`。地址、域名或端口变化后，设备记忆因 origin 改变可能需要重新配对。
+5. 等待「Root 热点路由已启用」，先用 `http://100.96.0.1/` 打开页面；**视频必须使用 HTTPS 入口 `https://100.96.0.1/`（HTTPS 映射默认 443）并让车机信任证书，WebCodecs 不会在 HTTP 页面出画面。** HTTP 入口仅用于设置与状态。拒绝 Root、缺少命令、端口占用或规则安装失败时，App 不展示已就绪的共享入口。修复后点击「重新启动 Root 路由」；不会持续重复申请 Root。
+6. 普通 HTTP 端口、Web 域名及可选 HTTPS 在「设置 → Web 监听」中配置，无需 Root。自备域名需配置 DNS A 记录，解析到实际访问 IP；填写域名不自动配置 DNS。映射端口不是 `80` 时使用 `http://你的域名:映射端口/`。地址、域名或端口变化后，浏览器需要重新打开页面。
 
-模式默认关闭，配置会保存。Root 检查结果仅在本次进程中有效，已启用 Root 方案时重新启动进程会自动重新检查；检查过程不阻塞普通 Web 监听。旧版本的模式与地址偏好保留；Web 域名和高位端口迁移到 Web 监听，旧低位端口迁移为映射端口，实际监听改用高位端口。Web 域名同时用于 HTTP 与 HTTPS；HTTPS 默认使用本地证书，启用 DuckDNS 后会安装 Let's Encrypt 证书。无 Root 时仍可使用普通局域网 HTTP/HTTPS 入口。
+模式默认关闭，配置会保存。Root 检查结果仅在本次进程中有效，已启用时重新启动进程会自动重新检查；检查过程不阻塞普通 Web 监听。旧版本的端口与地址偏好保留；Web 域名和高位端口迁移到 Web 监听，旧低位端口迁移为映射端口，实际监听改用高位端口。Web 域名同时用于 HTTP 与 HTTPS；HTTPS 默认使用本地证书，启用 DuckDNS 后会安装 Let's Encrypt 证书。无 Root 时仍可使用普通局域网 HTTP/HTTPS 入口。
+
+## Wi-Fi 联网检测应答（实验）
+
+车机加入 Wi-Fi 后，ConnMan 会请求 `http://connman.vn.cloud.tesla.cn/online/status.html` 做联网检测，只有得到 HTTP 200 才认为该 Wi-Fi 在线；失败时可能提示检测失败并离开热点。该端点是**明文 HTTP**，不涉及证书校验，因此可以在已 Root 的手机上本地应答。
+
+在「设置 → Tesla 兼容（实验）→ 应答 Wi-Fi 联网检测」开启后（要求已启用 Tesla 兼容、映射 HTTP 端口为 `80`）：
+
+- Root 事务在热点接口把**所有** UDP 53 查询 DNAT 到热点网关地址的 `15353` 端口（App 以普通权限监听 `0.0.0.0:15353`，不需要 root 绑定低位端口）。命中 `connman.vn.cloud.tesla.cn`、`connman.vn.cloud.tesla.com`、`connman.vn.tesla.services` 时返回访问 IP 的 A 记录；`AAAA` 返回无答案（NOERROR），让车机回退到 A。其余查询转发给热点网关和当前上行网络通告的 DNS。回程由 conntrack 还原成车机原本查询的 DNS 地址与 53 端口，车机侧看到的是正常 DNS 应答。
+- 车机随后请求 `http://访问IP/online/status.html`，经现有 `80 → Web 监听端口` 的 DNAT 进入 App；App 返回与生产端点一致的 46 字节页面和 `X-ConnMan-Status: online`。
+
+热点没有上行网络时，车机因此仍会认为 Wi-Fi 在线。关闭开关、停止 Web 服务、Root 路由失败或 App 退出时，DNS 重定向规则随现有 Root 事务按逆序撤销，本地 DNS 套接字随进程关闭；不需要修改系统 DNS、DHCP 或持久设置。
+
+限制与风险：
+
+- 只覆盖明文 HTTP 的检测路径。若目标车机版本改用 HTTPS 或校验响应内容，此功能不会生效，也不能用本地证书伪造。
+- 开启期间热点客户端的**全部** UDP DNS 查询都经 App 转发；上行 DNS 不可用时只能解析上述 probe 域名。功能默认关闭，关闭后立即恢复系统 DNS 路径。
+- 仅处理 UDP 53，不处理 TCP 53 或 DNS-over-HTTPS/TLS；DNAT 与 conntrack 回程改写依赖内核 IPv4 NAT。
+- 需要真实热点与 Tesla 实车验证：确认车机不再报告联网检测失败，并在诊断日志或 `adb logcat -s WheelPlayTesla` 中看到 `Wi-Fi 联网检测：...` 的 DNS 与 HTTP 记录。该日志会随诊断报告导出，但不改变现有脱敏规则。
 
 ## Root 路由和生命周期
 
-- 适配 VPN Hotspot 的下游策略路由、成对规则和逆序回滚机制，源码版本及修改见 [UPSTREAM.md](UPSTREAM.md)。共享范围是 **WheelPlay 的本地 HTTP/HTTPS 服务**，不提供手机第三方 VPN 的 Internet 转发。
+- 适配 VPN Hotspot 的下游策略路由、成对规则和逆序回滚机制，源码版本及修改见 [UPSTREAM.md](UPSTREAM.md)。共享范围是 **WheelPlay 的本地 HTTP/HTTPS 服务**，不提供 Internet 转发。
 - 用 Root 将共享地址作为 `/32` 添加到 loopback，通过 `lookup local` 投递；按系统实际报告的热点接口安装 HTTP 和 HTTPS 端口的 INPUT/OUTPUT 放行及源地址限定的回程路由。回程使用 Android 的 `local_network`（97）路由表，不依赖 Internet 默认路由。只展示完整安装成功的入口。
 - 只识别系统 `TETHER_STATE_CHANGED` 的 `tetherArray`，定期检查接口及 IPv4 地址；不根据 `wlan` 名称猜测热点。热点关闭时撤销规则，重开或接口/地址变化时重新创建。系统未提供热点状态时显示未检测到接口。
 - 关闭模式、停止 Web 服务、端口或地址变更时撤销旧规则。Root shell 持有事务，App 退出导致 stdin 关闭时执行清理；不清空系统/其他应用的规则，不修改持久系统设置。清理失败会撤下入口并提示检查或重启设备。
 - HTTP/HTTPS 的低位端口转发与共享 IPv4 地址、热点投递和回程规则在同一 Root 事务中管理。仅对发往此 `/32` 地址的 TCP 连接做端口 DNAT，保留目标 IP；普通局域网地址和本机预览继续使用 Web 监听端口。安装前检查现有监听器，已占用的低位端口会拒绝转发。任一步骤失败都会回滚；清理未确认时阻止继续安装新规则。启动回滚未确认时，本次进程内的手动重试、配置变化及 Web 服务停止/重启均不会解除保护，需检查残留规则或重启设备。Root 路由失败不影响普通 Web 监听。
 - 精确的访问 IP 匹配不依赖 `addrtype` 内核模块，兼容缺少该模块的 ROM。规则安装失败时提示具体命令及原始错误；仍需内核支持 IPv4 NAT/DNAT，以及规则使用的 TCP、comment、conntrack 匹配模块。
-- Tesla 模式与 CarPlay 会话独立；连接/断开 iPhone 不重建 HTTP 地址。无线 CarPlay 不使用 VPN；同一用户仅能有一个 VPN 的限制只影响 Tesla 地址接口。
-- 复用现有 HTTP/WebSocket 配对、设备撤销、画面、触控和浏览器音频。浏览器麦克风仍要求可信 HTTPS，可继续使用 Android 麦克风。
+- Tesla 模式与 CarPlay 会话独立；连接/断开 iPhone 不重建 HTTP 地址。Root 路由不占用 VPN 槽位，也不申请 VPN 授权。
+- 复用现有 HTTP/WebSocket、画面、触控和浏览器音频。Android 不播放音频也不采集麦克风；浏览器麦克风仍要求可信 HTTPS。
 
 ## Root 验证
 
-自动测试覆盖配置持久化、热点广播解析、命令输入校验、Root 拒绝后不自动重复申请、热点/端口变化和停止清理。真实 shell 测试以记录命令的替身代替内核操作，验证成功步骤逆序撤销、部分安装失败回滚及 stdin 关闭清理。无线 AirPlay 与 VPN 的独立性、HTTP 端口绑定失败回退和 WebSocket 仍由回归测试覆盖。
+自动测试覆盖配置持久化、热点广播解析、命令输入校验、Root 拒绝后不自动重复申请、热点/端口变化和停止清理。真实 shell 测试以记录命令的替身代替内核操作，验证成功步骤逆序撤销、部分安装失败回滚及 stdin 关闭清理。无线 AirPlay 与 Root 路由的独立性、HTTP 端口绑定失败回退和 WebSocket 仍由回归测试覆盖。
 
 这些测试不执行真实 Android Root 路由，尚需在 Root Android 热点及 Tesla 实机上验证：
 
-1. 先让另一台电脑/手机连接热点，访问完整的 HTTP IP 地址并配对，检查双向连接与服务端日志。
-2. 再用 Tesla 测试同一地址及可选域名，记录是否被改为 HTTPS或被浏览器策略拒绝。路由就绪不保证所有 Tesla 版本允许 HTTP。
-3. 验证 JPEG 连续画面、触控、音频；如使用 WebCodecs，另行验证 HTTPS 页面与浏览器解码能力。
+1. 先让另一台电脑/手机连接热点，访问完整的 HTTP IP 地址并打开页面，检查双向连接与服务端日志。
+2. 再用 Tesla 测试 HTTPS 入口及可选域名，记录证书信任情况和 WebCodecs 支持。路由就绪不保证所有 Tesla 版本允许本地地址或 HTTPS。
+3. 验证 HTTPS 页面下的 WebCodecs 连续画面、触控、音频；同时确认 HTTP 页面会明确提示需要 HTTPS。
 4. 测试热点关闭/重开、端口与 IP 变化、前后台切换、无线 iPhone 连接及断开、关闭模式、停止服务和强制停止 App；核对 `/32` 地址及规则清理。
 5. 拒绝/撤销 Root，确认失败时不展示共享地址、不反复弹授权；恢复权限后手动重试。
+6. 打开「应答 Wi-Fi 联网检测」，断开热点上行网络后让车机重新加入：确认不再出现联网检测失败，车机可继续访问 WheelPlay；诊断日志应出现 probe 域名的 DNS 查询和 `/online/status.html` 请求。再关闭开关、停止 Web 服务、强杀 App，核对 DNS DNAT 规则与 15353 监听均已消失，车机 DNS 恢复正常。
 
 ### DuckDNS 自动证书的触发时机
 

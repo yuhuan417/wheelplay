@@ -1,6 +1,5 @@
 plugins {
     id("com.android.library")
-    alias(libs.plugins.kotlin.compose)
 }
 
 android {
@@ -12,7 +11,7 @@ android {
     defaultConfig {
         minSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
+        ndk { abiFilters += listOf("arm64-v8a") }
         externalNativeBuild { cmake { targets += "wheelplay-video" } }
     }
 
@@ -25,28 +24,17 @@ android {
     }
 
     testOptions { unitTests.isIncludeAndroidResources = true }
-
-    buildFeatures {
-        compose = true
-    }
 }
 
 dependencies {
     implementation("org.bouncycastle:bcpkix-jdk18on:1.79")
-    implementation("io.github.g00fy2.quickie:quickie-bundled:1.12.0")
-    implementation("com.google.zxing:core:3.5.3")
     implementation("com.google.android.material:material:1.13.0")
     androidTestImplementation(libs.bouncycastle)
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     implementation("org.nanohttpd:nanohttpd-websocket:2.3.1")
     api(project(":shared"))
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation("androidx.activity:activity-ktx:1.8.0")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     testImplementation(libs.junit)

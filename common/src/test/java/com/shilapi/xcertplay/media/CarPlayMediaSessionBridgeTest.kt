@@ -148,7 +148,7 @@ class CarPlayMediaSessionBridgeTest {
         assertTrue(source.listeners.isEmpty()); assertNull(output.request)
     }
 
-    @Test fun remotePlaybackRetainsControlsAndReturnsToLocalAfterDetach() {
+    @Test fun remotePlaybackRetainsControlsAndRouteStaysRemote() {
         val context: Context = RuntimeEnvironment.getApplication()
         val source = Source(); val output = Output()
         val bridge = CarPlayMediaSessionBridge(context) { _, _, _ -> }
@@ -161,7 +161,7 @@ class CarPlayMediaSessionBridgeTest {
         controller.transportControls.skipToNext(); idle()
         assertEquals(MediaCommand.NEXT, source.sent.last())
         output.route!!(false); idle()
-        assertEquals(MediaController.PlaybackInfo.PLAYBACK_TYPE_LOCAL, controller.playbackInfo.playbackType)
+        assertEquals(MediaController.PlaybackInfo.PLAYBACK_TYPE_REMOTE, controller.playbackInfo.playbackType)
         bridge.close()
     }
 
@@ -186,26 +186,6 @@ class CarPlayMediaSessionBridgeTest {
         assertTrue(next.sent.isEmpty())
         bridge.close()
     }
-    @Test fun focusLossPausesThePhoneAndNeverAutoResumesOnGain() {
-        val context: Context = RuntimeEnvironment.getApplication()
-        val audio = context.getSystemService(android.media.AudioManager::class.java)
-        val shadow = shadowOf(audio)
-        val source = Source(); val output = Output()
-        val bridge = CarPlayMediaSessionBridge(context) { _, _, _ -> }
-        bridge.bind(source, output); source.update(playing()); idle()
-        assertTrue(output.allowed)
-        val focus = shadow.lastAudioFocusRequest.listener
-        focus.onAudioFocusChange(android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK)
-        assertFalse(output.allowed); assertEquals(listOf(MediaCommand.PAUSE), source.sent)
-        focus.onAudioFocusChange(android.media.AudioManager.AUDIOFOCUS_GAIN)
-        output.request!!(); idle()
-        assertFalse(output.allowed); assertEquals(1, source.sent.size)
-        bridge.command(MediaCommand.PLAY)
-        assertTrue(output.allowed); assertEquals(MediaCommand.PLAY, source.sent.last())
-        bridge.close()
-        assertNotNull(shadow.lastAbandonedAudioFocusRequest)
-    }
-
     @Test fun browserPlaybackDoesNotRequestLocalFocus() {
         val context: Context = RuntimeEnvironment.getApplication()
         val source = Source(); val output = Output()

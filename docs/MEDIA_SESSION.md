@@ -43,19 +43,15 @@ Artwork SETUP may arrive before its metadata. Unassociated SETUPs wait for their
 
 File replies use the existing bounded send queue and await link acknowledgements. Temporary backpressure does not mean negotiation is missing. A failed reply retires only the affected transfer, without terminating the entire artwork receiver or failing the control loop. Diagnostics include negotiated session IDs/types/versions, SETUP length/type/declared size, first/last fragment totals, reply queue acceptance or failure, and unexpected receiver termination. `queued` means queue acceptance, not receipt by the iPhone. Logs omit track names, image contents, and application-icon bundle IDs.
 
-Android `PlaybackState` uses iPhone reports and an `elapsedRealtime` anchor. A pause report stops progress extrapolation. HID controls send presses and releases through the existing descriptor; asynchronous results indicate sending only. A pause command temporarily blocks local buffered music, while reported state remains authoritative. If no pause is reported within three seconds, local output resumes according to the existing state.
+Android `PlaybackState` uses iPhone reports and an `elapsedRealtime` anchor. A pause report stops progress extrapolation. HID controls send presses and releases through the existing descriptor; asynchronous results indicate sending only. A pause command is forwarded to the iPhone; reported state remains authoritative. There is no local buffer or local output to resume.
 
 `DiPlaySessionService` creates and releases `CarPlayMediaSessionBridge`, which subscribes to the background controller independently of page listeners. The media notification includes the session token, artwork, and previous/play-or-pause/next actions. The stop-service action appears only in the connection notification. Actions use the official Material Icons 24dp monochrome vectors, supplied through resource-backed `Icon` objects; attribution is in [UPSTREAM.md](UPSTREAM.md). On Android 13 and later, the system can generate media controls from `PlaybackState`. The `mediaPlayback` foreground service type follows reported playback. Disconnecting restores the connection notification and deactivates the session. Old notification actions and callbacks cannot control a new connection.
 
-## Output and audio focus
+## Output and media session
 
-Local output uses `AudioTrack` with `USAGE_MEDIA`, following the system's current media route, including connected A2DP devices. No pairing, automatic Bluetooth connection, or output selector is added.
+CarPlay audio is decoded and forwarded to the connected browser only. Android never opens an `AudioTrack`, never requests audio focus, and has no local speaker fallback. The `MediaSession` is always a remote session with a fixed volume, so notification and lockscreen controls only forward commands to the iPhone.
 
-The browser route becomes remote only after browser readiness and successful media PCM delivery. Volume is fixed from Android's perspective and managed by the browser device. Browser disconnection or output cancellation immediately restores the local playback type. Remote playback does not request local audio focus. Local music requests focus before playback; focus loss or ducking pauses iPhone music and blocks local output. Regaining focus does not resume playback automatically. Navigation, calls, and Siri retain their existing handling.
-
-The renderer's idle maintenance only checks output permission. Actual music PCM that cannot be forwarded remotely creates one local focus demand, coalesced until permission is granted, the listener changes, or remote forwarding succeeds. Paused or denied local output therefore does not repeatedly post focus requests to the main thread. Browser fallback can create a fresh local demand, while navigation PCM does not request music focus.
-
-Android API references: [media controls](https://developer.android.com/media/implement/surfaces/mobile), [MediaSession](https://developer.android.com/reference/android/media/session/MediaSession), and [audio focus](https://developer.android.com/media/optimize/audio-focus).
+When no browser is ready, decoded PCM is dropped; nothing plays on Android. Enabling “CarPlay video only” additionally stops advertising audio and microphone capabilities so the iPhone keeps its own route (for example Bluetooth).
 
 ## Seek delivery gap
 
@@ -73,7 +69,7 @@ Synthetic fixtures and successful sends cannot establish these protocol behavior
 
 `shared/src/test/resources/media/` contains synthetic full-update and pause-delta CSM fixtures. Their README documents their origin; they are not iPhone captures.
 
-Automated coverage includes fields and malformed parameters, track changes, monotonic progress, artwork fragments/cancellation/limits/timeouts/invalid images, shared file/navigation ordering and retransmission, HID mapping, send outcomes, disconnects, stale connections, and completion of pending commands. Robolectric covers metadata, playback state, callbacks, notifications, fixed remote volume, focus-loss pausing, browser routing, and service release. Its shadows record API calls and link `MediaController` to the session; real Android Binder services, audio devices, and AVRCP are outside JVM validation.
+Automated coverage includes fields and malformed parameters, track changes, monotonic progress, artwork fragments/cancellation/limits/timeouts/invalid images, shared file/navigation ordering and retransmission, HID mapping, send outcomes, disconnects, stale connections, and completion of pending commands. Robolectric covers metadata, playback state, callbacks, notifications, fixed remote volume, browser routing, and service release. Its shadows record API calls and link `MediaController` to the session; real Android Binder services, audio devices, and AVRCP are outside JVM validation.
 
 On 2026-10-08, a V2547A device (API 37) was detected. The attempted Debug APK installation returned `INSTALL_FAILED_ABORTED: User rejected permissions`. No automatic retry or device acceptance run followed that attempt. Later user-supplied logs provide the partial wireless evidence below.
 
@@ -82,8 +78,7 @@ On 2026-10-08, a V2547A device (API 37) was detected. The attempted Debug APK in
 | Wireless iPhone media | Wireless audio/video and artwork reception partly verified | 15:27/15:29 logs confirm seven decoded covers, followed by local clearing on metadata updates; lyric-refresh fix and controls await retesting |
 | Android notification/lock screen | Unverified | Controls change iPhone playback; paused progress stops |
 | Page recreation/screen off/home | Unverified | Session persists; stopping the service leaves no session |
-| Browser takeover/disconnection | Unverified | Controls remain available; remote/local types follow actual output |
-| Another player taking focus | Unverified | iPhone and local music pause; resuming requires user action |
-| A2DP audio output | Unverified | Local PCM follows the system route without new pairing behavior |
+| Browser takeover/disconnection | Unverified | Controls remain available; the session stays remote |
+| iPhone Bluetooth audio | Unverified | With “video only”, audio and calls stay on the iPhone's Bluetooth route |
 | AVRCP buttons/metadata/artwork | Unverified | Record compatibility by receiver model and implementation |
 | Seek and stale audio after seeking | Unimplemented; protocol evidence pending | No guessed wire encoding or system scrubber |

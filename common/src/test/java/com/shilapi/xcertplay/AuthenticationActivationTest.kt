@@ -49,7 +49,6 @@ class AuthenticationActivationTest {
         WebSession.start(app)
         assertFalse(WebSession.running)
         assertNull(WebSession.tls)
-        assertEquals("", WebSession.code)
         controller.pause().stop().destroy()
     }
 

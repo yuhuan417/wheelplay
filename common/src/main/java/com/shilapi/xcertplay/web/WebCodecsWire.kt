@@ -5,9 +5,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Binary WebCodecs messages multiplexed on the paired control WebSocket next to JPEG and PCM audio.
+ * Binary WebCodecs messages multiplexed on the paired control WebSocket next to PCM audio.
  *
- * Both message kinds start with the magic so the browser can tell them apart from a JPEG payload.
+ * Both message kinds start with the magic so the browser can tell them apart from audio packets.
  * All integers are little-endian to match the audio wire format.
  *
  * Config: [magic u32][type=1 u8][streamType u8][flags u8][reserved u8]

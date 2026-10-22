@@ -103,7 +103,7 @@ iPhone 被过早要求加入没有外网的热点。
 
 | 途径 | 方法 |
 |---|---|
-| logcat | `adb logcat -s xcertplay-usb`（连接 / iAP2 / VPN / 无线 bring-up 共用此 tag，失败带堆栈） |
+| logcat | `adb logcat -s xcertplay-usb`（连接 / iAP2 / 无线 bring-up 共用此 tag，失败带堆栈） |
 | 日志文件 | `/data/data/<包名>/files/logs/diplay.log`（有轮转归档） |
 | 诊断报告 | 设置 → 「关于与诊断」→「保存诊断报告」→ `Downloads/WheelPlay/WheelPlay-<时间戳>.txt` |
 

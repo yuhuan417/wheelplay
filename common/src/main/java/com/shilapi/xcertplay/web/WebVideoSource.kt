@@ -10,9 +10,8 @@ import com.shilapi.xcertplay.media.MediaCodecSupport
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
-/** Owned by one AirPlay session, including the decoder handoff and keyframe recovery. */
+/** Owned by one AirPlay session; forwards compressed frames to the paired browser. */
 internal class WebVideoSource(
-    val technology: StreamTechnology,
     private val displayWidth: Int = 0,
     private val displayHeight: Int = 0,
 ) : EncodedVideoSink {
@@ -44,9 +43,6 @@ internal class WebVideoSource(
     private var lastConfig: ByteArray? = null
     private var lastConfigType = -1
     private var lastConfigCodec: VideoCodec? = null
-    // WebCodecs is a strict transport: a decode failure must stay visible in the diagnostic log
-    // instead of being masked by a JPEG fallback.
-    val jpegNeeded get() = technology != StreamTechnology.WEBCODECS
 
     override fun createFrameDecoder(key: ByteArray): VideoFrameDecoder? = try {
         NativeVideoDecoder(key, platform = true).also { processor = it.name }
@@ -65,7 +61,7 @@ internal class WebVideoSource(
         lastConfigType = -1
         lastConfigCodec = null
         lastPts = null
-        if (technology == StreamTechnology.WEBCODECS) configureWebCodecs(type, codec, data)
+        configureWebCodecs(type, codec, data)
     }
 
     private fun configureWebCodecs(type: Int, codec: VideoCodec, data: ByteArray) {
@@ -163,15 +159,12 @@ internal class WebVideoSource(
         val previous = lastPts
         if (previous != null && presentationTimeUs >= previous) performance.timing("ptsInterval", (presentationTimeUs - previous) * 1000)
         lastPts = presentationTimeUs
-        if (technology == StreamTechnology.WEBCODECS) {
-            val webCodecs = webCodecsConfig
-            if (webCodecs != null && webCodecs.type == type) {
-                webCodecsConsumer?.onFrame(frame, frame.isRandomAccess(webCodecs.codec), presentationTimeUs)
-            }
-            // Never feed the local JPEG decoder in WebCodecs mode, even before a viewer attaches.
-            return true
+        val webCodecs = webCodecsConfig
+        if (webCodecs != null && webCodecs.type == type) {
+            webCodecsConsumer?.onFrame(frame, frame.isRandomAccess(webCodecs.codec), presentationTimeUs)
         }
-        return false
+        // The browser decodes every frame; there is no local decode path to feed.
+        return true
     }
 
     @Synchronized override fun stopped(type: Int) {

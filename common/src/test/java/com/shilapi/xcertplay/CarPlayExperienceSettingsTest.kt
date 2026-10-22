@@ -48,31 +48,27 @@ class CarPlayExperienceSettingsTest {
     }
 
     @Test fun defaultsPreserveExistingBehaviorAndLegacyBrowserMicrophoneMigrates() {
-        assertEquals(CarPlayAppearance.SYSTEM, AirPlayPersistence.loadAppearance(context))
+        assertEquals(CarPlayAppearance.DAY, AirPlayPersistence.loadAppearance(context))
         assertEquals(BrowserOfflinePolicy.KEEP, AirPlayPersistence.loadBrowserOfflinePolicy(context))
         assertNull(AirPlayPersistence.loadSafeMargins(context))
-        assertEquals(CarPlayMicrophoneSource.ANDROID, AirPlayPersistence.loadMicrophoneSource(context))
+        assertEquals(CarPlayMicrophoneSource.DISABLED, AirPlayPersistence.loadMicrophoneSource(context))
         context.getSharedPreferences("xcertplay_airplay", 0).edit().putBoolean("browser_microphone", true).commit()
         assertEquals(CarPlayMicrophoneSource.BROWSER, AirPlayPersistence.loadMicrophoneSource(context))
         WebSession.setMicrophoneSource(context, CarPlayMicrophoneSource.DISABLED)
         WebSession.setMediaBufferMillis(context, 1000)
-        WebSession.setBrowserAudioPlayback(context, true)
         assertEquals(CarPlayMicrophoneSource.DISABLED, AirPlayPersistence.loadMicrophoneSource(context))
         WebSession.audio.createRoute().use { assertFalse(it.microphoneEnabled) }
-        assertFalse(AirPlayPersistence.loadBrowserMicrophone(context))
-        WebSession.setMicrophoneSource(context, CarPlayMicrophoneSource.ANDROID)
+        WebSession.setMicrophoneSource(context, CarPlayMicrophoneSource.BROWSER)
     }
 
     @Test fun sourceAndAppearanceChoicesSaveAndCancellationDoesNotOverwriteThem() {
         val controller = Robolectric.buildActivity(DiPlayActivity::class.java).setup()
         val activity = controller.get(); openSettings(activity)
-        choose(activity, "CarPlay 昼夜模式", 2)
+        choose(activity, "CarPlay 昼夜模式", 1)
         assertEquals(CarPlayAppearance.NIGHT, AirPlayPersistence.loadAppearance(context))
-        choose(activity, "CarPlay 昼夜模式", 1, save = false)
+        choose(activity, "CarPlay 昼夜模式", 0, save = false)
         assertEquals(CarPlayAppearance.NIGHT, AirPlayPersistence.loadAppearance(context))
-        choose(activity, "音频输出", 1)
-        assertTrue(AirPlayPersistence.loadBrowserAudioPlayback(context))
-        choose(activity, "麦克风来源", 2)
+        choose(activity, "麦克风来源", 1)
         assertEquals(CarPlayMicrophoneSource.DISABLED, AirPlayPersistence.loadMicrophoneSource(context))
         choose(activity, "浏览器离线后的处理", 2)
         assertEquals(BrowserOfflinePolicy.FIVE_MINUTES, AirPlayPersistence.loadBrowserOfflinePolicy(context))
@@ -82,7 +78,7 @@ class CarPlayExperienceSettingsTest {
         assertEquals("CarPlay 昼夜模式，始终夜间", row(next.get(), "CarPlay 昼夜模式").contentDescription)
         assertEquals("麦克风来源，禁用麦克风", row(next.get(), "麦克风来源").contentDescription)
         next.pause().stop().destroy()
-        WebSession.setMicrophoneSource(context, CarPlayMicrophoneSource.ANDROID)
+        WebSession.setMicrophoneSource(context, CarPlayMicrophoneSource.BROWSER)
     }
 
     @Test fun safeMarginsRetainLegacyMappingUntilEditedAndScaleAcrossResolutions() {

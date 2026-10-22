@@ -189,6 +189,27 @@ class RootHttpRoutingTest {
             mapped.commands().asReversed().map { recorded(it.revert) }, log.readLines())
     }
 
+    @Test fun probeRedirectsHotspotDnsToTheLocalResponderAndRequiresPort80() {
+        val probed = plan.copy(httpMappingPort = 80, probe = true)
+        val dns = probed.commands().filter { it.apply.contains("--dport 53") }
+        assertEquals(1, dns.size)
+        assertTrue(dns.single().apply.contains("-t nat -I PREROUTING -i ap0"))
+        assertTrue(dns.single().apply.contains("--to-destination 192.168.43.1:15353"))
+        assertTrue(probed.commands().any { it.apply.contains("INPUT -i ap0 -d 192.168.43.1/32 -p udp --dport 15353") })
+        assertTrue(probed.commands().any { it.apply.contains("--sport 15353") })
+        try {
+            plan.copy(probe = true)
+            fail("probe without the port-80 mapping must be rejected")
+        } catch (_: IllegalArgumentException) { }
+    }
+
+    @Test fun probeDnsRulesAreRevertedWithTheTransaction() = withShell { log, launch ->
+        val probed = plan.copy(httpMappingPort = 80, probe = true)
+        RootHttpShell.open(probed, launch).close()
+        assertEquals(probed.commands().map { recorded(it.apply) } +
+            probed.commands().asReversed().map { recorded(it.revert) }, log.readLines())
+    }
+
     @Test fun startupErrorKeepsTheFailedCommandAndOriginalErrorAfterRollback() = withShell(failAt = 4) { _, launch ->
         val error = runCatching { RootHttpShell.open(plan, launch) }.exceptionOrNull()
         assertTrue(error?.message.orEmpty().contains("No chain/target/match by that name"))

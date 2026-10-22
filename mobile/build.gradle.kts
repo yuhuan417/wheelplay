@@ -2,7 +2,6 @@ import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.compose)
 }
 
 // Local provisioning stays out of version control. An environment override takes precedence.
@@ -24,6 +23,8 @@ android {
         versionCode = 21
         versionName = "0.3.0"
 
+        // Xiaomi 8 / Snapdragon 845 is arm64 only; do not ship 32-bit or emulator ABIs.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
 
@@ -56,24 +57,13 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
-    }
-    buildFeatures {
-        compose = true
-    }
-}
+    }}
 
 dependencies {
-    implementation(platform(libs.androidx.compose.bom))
     implementation(project(":common"))
     implementation(project(":shared"))
-    implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    debugImplementation(libs.androidx.compose.ui.tooling)
 }
 
 // Only the two provisioned local runtime assets are allowed.

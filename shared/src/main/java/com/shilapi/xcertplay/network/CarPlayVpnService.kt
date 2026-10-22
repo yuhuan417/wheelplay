@@ -1,13 +1,10 @@
 package com.shilapi.xcertplay.network
 
-import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
-import android.os.ParcelFileDescriptor
 import android.util.Log
-import android.system.OsConstants
 import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.AirPlayListenerIdentity
@@ -21,17 +18,12 @@ import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Hosts the AirPlay TCP listener on the local-only Wi-Fi transport.
- *
- * The same service also owns the optional Tesla HTTP VPN aliases, which are independent of the
- * AirPlay listener. VPN consent for those aliases is requested with [prepare] before binding.
- */
+/** Hosts the AirPlay TCP listener on the local-only Wi-Fi transport. */
+
 open class CarPlayVpnService : VpnService() {
     inner class LocalBinder : Binder() {
         val service: CarPlayVpnService get() = this@CarPlayVpnService
@@ -61,85 +53,6 @@ open class CarPlayVpnService : VpnService() {
     @Volatile private var attachment: AirPlayAttachment? = null
     private var serverSocket: ServerSocket? = null
     private var attachGeneration = 0
-    private var teslaAddress: String? = null
-    private var installedTeslaAddress: String? = null
-    private var teslaAnchor: ParcelFileDescriptor? = null
-    private var teslaAnchorDuplicate: ParcelFileDescriptor? = null
-    private var teslaPlaceholder: ParcelFileDescriptor? = null
-    private var teslaFailure: String? = null
-    private var destroying = false
-    @Volatile var teslaVpnStatus = TeslaHttpStatus(mode = TeslaHttpMode.VPN)
-        private set
-
-    /** No packet reader is attached to these IPv4 TUNs. */
-    protected open fun establishTeslaTunnel(address: String): ParcelFileDescriptor = Builder()
-        .setSession("WheelPlay Tesla (experimental)")
-        .allowFamily(OsConstants.AF_INET)
-        .allowFamily(OsConstants.AF_INET6)
-        .allowBypass()
-        .addAddress(address, 32)
-        .addRoute(address, 32)
-        .establish() ?: throw IOException("Tesla VPN 未获授权，请在设置中授权后重试")
-
-    protected open fun duplicateTeslaTunnel(fd: ParcelFileDescriptor): ParcelFileDescriptor =
-        fd.dup()
-
-    protected open fun isTeslaAddressPresent(address: String): Boolean =
-        NetworkInterface.getNetworkInterfaces()?.toList().orEmpty().any { iface ->
-            // The retained anchor is deliberately DOWN; do not filter by isUp.
-            iface.inetAddresses.toList().any { it.hostAddress == address }
-        }
-
-    /** Called by the independent Web owner, including while no iPhone is attached. */
-    @Synchronized
-    fun setTeslaAddress(address: String?, retry: Boolean = false): TeslaHttpStatus {
-        require(address == null || TeslaHttpConfig.isHttpAddress(address) &&
-            address != TeslaHttpConfig.VPN_PLACEHOLDER_ADDRESS)
-        if (address != teslaAddress || retry) teslaFailure = null
-        teslaAddress = address
-        reconcileTeslaLocked()
-        return teslaVpnStatus
-    }
-
-    private fun reconcileTeslaLocked() {
-        val address = teslaAddress
-        if (address == null || destroying) {
-            closeTeslaLocked()
-            teslaVpnStatus = TeslaHttpStatus(mode = TeslaHttpMode.VPN)
-            return
-        }
-        try {
-            teslaFailure?.let { throw IOException(it) }
-            // Do not call prepare() from reconciliation: a pre-consented app can take VPN
-            // ownership back from another app. establish() itself fails if no longer prepared.
-            if (installedTeslaAddress != address) {
-                closeTeslaLocked()
-                teslaAnchor = establishTeslaTunnel(address)
-                teslaAnchorDuplicate = duplicateTeslaTunnel(teslaAnchor!!)
-                installedTeslaAddress = address
-            }
-            if (teslaPlaceholder == null) {
-                teslaPlaceholder = establishTeslaTunnel(TeslaHttpConfig.VPN_PLACEHOLDER_ADDRESS)
-            }
-            if (!isTeslaAddressPresent(address)) throw IOException("系统未保留访问 IP；此设备可能不支持免 Root 模式，请关闭或手动重试")
-            teslaVpnStatus = TeslaHttpStatus(address = address, mode = TeslaHttpMode.VPN)
-        } catch (error: Exception) {
-            teslaFailure = error.message ?: "免 Root VPN 配置失败"
-            closeTeslaLocked()
-            teslaVpnStatus = TeslaHttpStatus(error = teslaFailure, mode = TeslaHttpMode.VPN)
-        }
-    }
-
-    private fun closeTeslaLocked() {
-        // Close every reference: the anchor disappears only after its last FD is closed.
-        listOf(teslaPlaceholder, teslaAnchorDuplicate, teslaAnchor).forEach { fd ->
-            runCatching { fd?.close() }.onFailure { Log.w(TAG, "Tesla TUN close failed", it) }
-        }
-        teslaPlaceholder = null
-        teslaAnchorDuplicate = null
-        teslaAnchor = null
-        installedTeslaAddress = null
-    }
 
     override fun onBind(intent: Intent?): IBinder? =
         if (intent?.action == SERVICE_INTERFACE) super.onBind(intent) else binder
@@ -186,16 +99,11 @@ open class CarPlayVpnService : VpnService() {
 
     @Synchronized
     override fun onRevoke() {
-        // Only the Tesla HTTP aliases use the VPN API; wireless AirPlay is independent.
-        teslaFailure = "VPN 授权已撤销，请在设置中重新授权并重试"
-        closeTeslaLocked()
-        teslaVpnStatus = TeslaHttpStatus(error = teslaFailure, mode = TeslaHttpMode.VPN)
         super.onRevoke()
     }
 
     @Synchronized
     override fun onDestroy() {
-        destroying = true
         releaseLocked()
         super.onDestroy()
     }
@@ -323,13 +231,9 @@ open class CarPlayVpnService : VpnService() {
         serverSocket?.close()
         serverSocket = null
         closeSessionsLocked()
-        reconcileTeslaLocked()
     }
 
     companion object {
         private const val TAG = "xcertplay-usb"
-
-        /** Returns the VPN consent intent, or null when consent is already granted. */
-        fun prepare(context: Context): Intent? = VpnService.prepare(context)
     }
 }

@@ -1,8 +1,5 @@
 package com.shilapi.xcertplay.media
 
-import android.media.AudioFormat as AndroidAudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.util.Log
 import com.shilapi.xcertplay.airplay.AudioCodecKind
 import com.shilapi.xcertplay.airplay.MicrophoneConfig
@@ -17,19 +14,18 @@ import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Captures one PCM microphone stream and sends it back to the phone as sealed CarPlay RTP.
+ * Forwards one browser-captured PCM microphone stream to the phone as sealed CarPlay RTP.
  *
- * The recorder runs only while the matching audio stream is active, so callers start this after
- * the first downlink audio packet and close it on stream teardown.
+ * The Android device never records audio itself; callers start this after the first downlink
+ * audio packet and close it on stream teardown.
  */
 internal class MicrophoneUplink(
     private val config: MicrophoneConfig,
-    private val input: PcmInput? = null,
+    private val input: PcmInput,
     private val counters: MicrophoneCounters = MicrophoneCounters(),
 ) : Closeable {
     private val running = AtomicBoolean(false)
     private val firstPacketLogged = AtomicBoolean(false)
-    @Volatile private var recorder: AudioRecord? = null
     @Volatile private var socket: DatagramSocket? = null
     @Volatile private var opusEncoder: OpusEncoder? = null
     private var thread: Thread? = null
@@ -37,27 +33,6 @@ internal class MicrophoneUplink(
     fun start(): Boolean {
         if (!running.compareAndSet(false, true)) return true
 
-        val channelMask = if (config.channels >= 2) {
-            AndroidAudioFormat.CHANNEL_IN_STEREO
-        } else {
-            AndroidAudioFormat.CHANNEL_IN_MONO
-        }
-        val minBuffer = AudioRecord.getMinBufferSize(
-            config.sampleRate,
-            channelMask,
-            AndroidAudioFormat.ENCODING_PCM_16BIT,
-        )
-        if (input == null && minBuffer <= 0) {
-            Log.w(TAG, "microphone unavailable rate=${config.sampleRate} channels=${config.channels}")
-            running.set(false)
-            return false
-        }
-
-        val source = when (config.audioType) {
-            "telephony" -> MediaRecorder.AudioSource.VOICE_COMMUNICATION
-            "speechrecognition" -> MediaRecorder.AudioSource.VOICE_RECOGNITION
-            else -> MediaRecorder.AudioSource.MIC
-        }
         val nextEncoder = if (config.codec == AudioCodecKind.OPUS) {
             OpusEncoder(config.bitrate ?: 48_000).takeIf { it.available }
         } else {
@@ -68,33 +43,6 @@ internal class MicrophoneUplink(
             running.set(false)
             return false
         }
-        val bufferSize = maxOf(minBuffer * 2, config.frameBytes * 4)
-        val nextRecorder = if (input != null) null else try {
-            AudioRecord.Builder()
-                .setAudioSource(source)
-                .setAudioFormat(
-                    AndroidAudioFormat.Builder()
-                        .setEncoding(AndroidAudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(config.sampleRate)
-                        .setChannelMask(channelMask)
-                        .build(),
-                )
-                .setBufferSizeInBytes(bufferSize)
-                .build()
-        } catch (error: Exception) {
-            Log.e(TAG, "microphone recorder creation failed", error)
-            nextEncoder?.close()
-            running.set(false)
-            return false
-        }
-        if (nextRecorder != null && nextRecorder.state != AudioRecord.STATE_INITIALIZED) {
-            Log.w(TAG, "microphone recorder failed to initialize")
-            nextRecorder?.release()
-            nextEncoder?.close()
-            running.set(false)
-            return false
-        }
-
         val nextSocket = try {
             DatagramSocket(null).apply {
                 reuseAddress = true
@@ -102,18 +50,15 @@ internal class MicrophoneUplink(
             }
         } catch (error: Exception) {
             Log.e(TAG, "microphone socket creation failed", error)
-            nextRecorder?.release()
             nextEncoder?.close()
             running.set(false)
             return false
         }
 
-        recorder = nextRecorder
         socket = nextSocket
         opusEncoder = nextEncoder
         return try {
-            nextRecorder?.startRecording()
-            thread = Thread({ capture(nextRecorder, nextSocket) }, "carplay-mic").apply {
+            thread = Thread({ capture(nextSocket) }, "carplay-mic").apply {
                 isDaemon = true
                 start()
             }
@@ -125,27 +70,21 @@ internal class MicrophoneUplink(
             )
             true
         } catch (error: Exception) {
-            Log.e(TAG, "microphone recording failed", error)
+            Log.e(TAG, "microphone forward failed", error)
             release()
             false
         }
     }
 
-    private fun capture(recorder: AudioRecord?, socket: DatagramSocket) {
+    private fun capture(socket: DatagramSocket) {
         val frame = ByteArray(config.frameBytes)
         val readBuffer = ByteArray(maxOf(frame.size, MIN_READ_BYTES))
         var filled = 0
         try {
             while (running.get()) {
-                val count = input?.read(readBuffer)
-                    ?: recorder!!.read(readBuffer, 0, readBuffer.size, AudioRecord.READ_BLOCKING)
-                if (count < 0) {
-                    if (running.get() && input == null) Log.e(TAG, "microphone read failed code=$count")
-                    return
-                }
-                if (count == 0) {
-                    continue
-                }
+                val count = input.read(readBuffer)
+                if (count < 0) return
+                if (count == 0) continue
                 var offset = 0
                 while (offset < count && running.get()) {
                     val copied = minOf(frame.size - filled, count - offset)
@@ -211,15 +150,10 @@ internal class MicrophoneUplink(
     }
 
     override fun close() {
-        input?.close()
+        input.close()
         if (!running.compareAndSet(true, false)) {
             release()
             return
-        }
-        try {
-            recorder?.stop()
-        } catch (_: Exception) {
-            // Best effort; release below is authoritative.
         }
         try {
             socket?.close()
@@ -240,13 +174,6 @@ internal class MicrophoneUplink(
     @Synchronized
     private fun release() {
         running.set(false)
-        val currentRecorder = recorder
-        recorder = null
-        try {
-            currentRecorder?.release()
-        } catch (_: Exception) {
-            // Best effort.
-        }
         val currentSocket = socket
         socket = null
         try {

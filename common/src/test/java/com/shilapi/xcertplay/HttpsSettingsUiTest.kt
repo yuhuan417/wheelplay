@@ -122,7 +122,7 @@ class HttpsSettingsUiTest {
         } finally { RootAccess.authorize = original; controller.pause().stop().destroy(); WebSession.stop() }
     }
 
-    @Test fun modeSelectorPrecedesRootRequestAndMappingControlsRequireAccess() {
+    @Test fun rootRequestPrecedesMappingControlsAndRequiresAccess() {
         val original = RootAccess.authorize
         var requests = 0
         RootAccess.authorize = { requests++ }
@@ -136,8 +136,7 @@ class HttpsSettingsUiTest {
             val button = rootButton(activity)
             val row = button.parent as ViewGroup
             val section = row.parent as ViewGroup
-            assertSame(row, section.getChildAt(1))
-            assertTrue(hasRow(activity, "连接方案"))
+            assertSame(row, section.getChildAt(0))
             button.performClick()
             waitForUi(activity) { RootAccess.granted }
             assertEquals(1, requests)

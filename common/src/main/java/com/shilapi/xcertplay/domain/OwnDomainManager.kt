@@ -120,7 +120,7 @@ internal object OwnDomainManager {
             config.validate()?.let { throw OwnDomainException(it) }
             // DuckDNS is the DNS/certificate part of Tesla compatibility: publish the same
             // access address the car already uses for the HTTP/HTTPS listener.
-            val address = TeslaHttpCompatibility.config(context).accessAddress
+            val address = TeslaHttpCompatibility.config(context).address
             status = Status("检查中", "正在检查 DuckDNS 解析与证书", config.domain, address)
             val networks = awaitInternetNetworks(context)
             if (networks.isEmpty()) {

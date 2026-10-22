@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.web
 
 import android.content.Context
 import android.os.SystemClock
+import com.shilapi.xcertplay.DiagnosticLogSink
 import com.shilapi.xcertplay.airplay.AirPlayContact
 import com.shilapi.xcertplay.media.CompressedVideoFrame
 import fi.iki.elonen.NanoHTTPD
@@ -13,20 +14,14 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Same-origin HTTP assets and a single paired, backpressured video/control WebSocket. */
-internal class LanWebServer(private val context: Context, private val code: String, port: Int = WebListenSettings.DEFAULT_HTTP_PORT,
-    private val secure: Boolean = false, val pairing: QrPairing = QrPairing()) : NanoWSD("0.0.0.0", port) {
+/** Same-origin HTTP assets and a single backpressured video/control WebSocket. */
+internal class LanWebServer(private val context: Context, port: Int = WebListenSettings.DEFAULT_HTTP_PORT,
+    private val secure: Boolean = false) : NanoWSD("0.0.0.0", port) {
     init { require(port == 0 || port in 1024..65535) { "Web 监听请使用高位端口；低位端口由 Tesla 兼容映射" } }
     val ready get() = isAlive
     @Volatile private var viewer: Client? = null
     private val timer = Executors.newSingleThreadScheduledExecutor()
-    @Volatile private var failures = 0
-    @Volatile private var retryAt = 0L
-    private val devices = WebSession.rememberedBrowsers(context)
-    private val enrolled = mutableMapOf<String, RememberedBrowsers.Credential>()
     val hasViewer get() = viewer != null
-    val jpegReady get() = viewer?.jpegReady == true
-    fun frameAvailable() { viewer?.frameAvailable() }
     fun requestHostUi(): Boolean = viewer?.requestHostUi() == true
     fun disconnectViewer() { viewer?.disconnect("设备已移除") }
 
@@ -38,26 +33,10 @@ internal class LanWebServer(private val context: Context, private val code: Stri
         return super.createClientHandler(finalAccept, inputStream)
     }
 
-    fun disconnectUnauthorized() {
-        viewer?.let { if (!it.authorized()) it.disconnect("设备已移除或配对已过期") }
-    }
-
-    @Synchronized private fun acceptCode(value: String?): Boolean {
-        val now = SystemClock.elapsedRealtime()
-        if (now < retryAt) return false
-        if (value != code) {
-            if (++failures >= 5) { retryAt = now + 30000; failures = 0 }
-            return false
-        }
-        failures = 0
-        return true
-    }
-
     init {
         timer.scheduleAtFixedRate({
             val now = SystemClock.elapsedRealtime()
             WebSession.touch.expire(now)
-            disconnectUnauthorized()
             viewer?.let { if (now - it.lastSeen > 6000 || it.frameStalled(now)) it.disconnect("连接超时") }
         }, 500, 500, TimeUnit.MILLISECONDS)
     }
@@ -70,10 +49,6 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                 parsed.scheme == (if (secure) "https" else "http") && parsed.rawAuthority.equals(session.headers["host"], true)
             }.getOrDefault(false)
             if (!sameOrigin) return response(Response.Status.FORBIDDEN, "Origin rejected")
-            if (!pairing.authorized(session.parameters["token"]?.firstOrNull()) &&
-                !acceptCode(session.parameters["code"]?.firstOrNull())) {
-                return response(Response.Status.UNAUTHORIZED, "Pairing code required")
-            }
             return super.serve(session)
         }
         // Never upgrade arbitrary paths into a control channel.
@@ -82,8 +57,18 @@ internal class LanWebServer(private val context: Context, private val code: Stri
     }
 
     override fun serveHttp(session: IHTTPSession): Response {
-        if (session.uri.startsWith("/pair/")) return servePairing(session)
         if (session.method != Method.GET) return response(Response.Status.METHOD_NOT_ALLOWED, "GET only")
+        if (session.uri == TeslaWifiProbe.STATUS_PATH) {
+            // ConnMan's plain-HTTP online check: 200 means "this Wi-Fi has internet". The rooted
+            // Tesla compatibility routing resolves the probe host names here instead of Tesla.
+            android.util.Log.i("WheelPlayTesla", "Wi-Fi internet check from ${session.remoteIpAddress} (${session.headers["host"]})")
+            DiagnosticLogSink.append("Wi-Fi 联网检测：HTTP 请求来自 ${session.remoteIpAddress}（${session.headers["host"]}）")
+            return newFixedLengthResponse(Response.Status.OK, "text/html",
+                TeslaWifiProbe.STATUS_BODY.inputStream(), TeslaWifiProbe.STATUS_BODY.size.toLong()).apply {
+                addHeader(TeslaWifiProbe.STATUS_HEADER, TeslaWifiProbe.STATUS_HEADER_VALUE)
+                addHeader("Cache-Control", "no-store")
+            }
+        }
         if (session.uri == "/tls.json") return newFixedLengthResponse(Response.Status.OK, "application/json",
             JSONObject().put("available", WebSession.httpsReady).put("fingerprint", WebSession.tls?.fingerprint)
                 .put("port", WebSession.httpsPortFor(context, session.headers["host"])).put("customCertificate", WebSession.tls?.custom == true)
@@ -115,121 +100,20 @@ internal class LanWebServer(private val context: Context, private val code: Stri
         }
     }
 
-    private fun servePairing(session: IHTTPSession): Response {
-        val id = session.headers["x-pair-id"] ?: session.parameters["id"]?.firstOrNull()
-        val secret = session.headers["x-pair-secret"] ?: session.parameters["secret"]?.firstOrNull()
-        if (session.uri == "/pair/qr" && session.method == Method.GET) {
-            val request = pairing.get(id, secret) ?: return response(Response.Status.NOT_FOUND, "Expired")
-            val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(request.payload,
-                com.google.zxing.BarcodeFormat.QR_CODE, 0, 0,
-                mapOf(com.google.zxing.EncodeHintType.MARGIN to 4))
-            val path = buildString {
-                for (y in 0 until matrix.height) for (x in 0 until matrix.width) {
-                    if (matrix[x, y]) append("M$x,$y h1v1h-1z")
-                }
-            }
-            val svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${matrix.width} ${matrix.height}" shape-rendering="crispEdges"><path fill="white" d="M0,0h${matrix.width}v${matrix.height}H0z"/><path fill="black" d="$path"/></svg>"""
-            return newFixedLengthResponse(Response.Status.OK, "image/svg+xml", svg).apply {
-                addHeader("Cache-Control", "no-store"); addHeader("X-Content-Type-Options", "nosniff")
-                addHeader("Referrer-Policy", "no-referrer")
-            }
-        }
-        if (session.method != Method.POST) return response(Response.Status.METHOD_NOT_ALLOWED, "POST only")
-        val sameOrigin = runCatching {
-            val origin = URI(session.headers["origin"] ?: "")
-            origin.scheme == (if (secure) "https" else "http") && origin.rawAuthority.equals(session.headers["host"], true)
-        }.getOrDefault(false)
-        if (!sameOrigin) return response(Response.Status.FORBIDDEN, "Origin rejected")
-        val json = when (session.uri) {
-            "/pair/request" -> {
-                val request = pairing.create(session.remoteIpAddress)
-                    ?: return response(Response.Status.FORBIDDEN, "Too many requests; try again in two minutes")
-                JSONObject().put("id", request.id).put("secret", request.pollSecret).put("expiresIn", 120)
-            }
-            "/pair/status" -> {
-                val request = pairing.get(id, secret) ?: return response(Response.Status.NOT_FOUND, "Expired")
-                JSONObject().put("state", if (request.token == null) "pending" else "approved")
-                    .apply { request.token?.let { put("token", it) } }
-            }
-            "/pair/code" -> {
-                if (!acceptCode(session.headers["x-pair-code"]))
-                    return response(Response.Status.UNAUTHORIZED, "Pairing code required")
-                val token = pairing.issueToken() ?: return response(Response.Status.FORBIDDEN, "Too many sessions")
-                JSONObject().put("token", token)
-            }
-            "/pair/remember" -> synchronized(devices) {
-                val token = session.headers["x-pair-token"]
-                if (token == null || !pairing.authorized(token))
-                    return response(Response.Status.UNAUTHORIZED, "Pairing required")
-                enrolled.entries.removeAll { !pairing.authorized(it.key) }
-                val credential = enrolled[token] ?: run {
-                    // Resumed tokens are already bound. They cannot create additional devices.
-                    if (pairing.deviceId(token) != null)
-                        return response(Response.Status.FORBIDDEN, "Device already remembered")
-                    val name = browserName(session.headers["user-agent"].orEmpty())
-                    devices.remember(name, session.remoteIpAddress)
-                        ?: return response(Response.Status.FORBIDDEN, "Cannot remember device; check device limit")
-                }.also { enrolled[token] = it }
-                pairing.bindDevice(token, credential.device.id)
-                JSONObject().put("id", credential.device.id).put("secret", credential.secret)
-                    .put("name", credential.device.name)
-            }
-            "/pair/resume" -> synchronized(devices) {
-                val device = devices.authenticate(session.headers["x-device-id"], session.headers["x-device-secret"], session.remoteIpAddress)
-                    ?: return response(Response.Status.UNAUTHORIZED, "Device not remembered")
-                val token = pairing.issueToken(device.id) ?: return response(Response.Status.FORBIDDEN, "Too many sessions")
-                JSONObject().put("token", token).put("name", device.name)
-            }
-            "/pair/revoke" -> { pairing.revoke(session.headers["x-pair-token"]); JSONObject().put("state", "revoked") }
-            "/pair/cancel" -> { pairing.cancel(id, secret); JSONObject().put("state", "cancelled") }
-            else -> return response(Response.Status.NOT_FOUND, "Not found")
-        }
-        return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString()).apply {
-            addHeader("Cache-Control", "no-store"); addHeader("X-Content-Type-Options", "nosniff")
-        }
-    }
-
-    private fun browserName(agent: String): String {
-        val browser = when {
-            "Edg/" in agent -> "Edge"
-            "Chrome/" in agent -> "Chrome"
-            "Firefox/" in agent -> "Firefox"
-            "Safari/" in agent -> "Safari"
-            else -> "浏览器"
-        }
-        val platform = when {
-            "Android" in agent -> "Android"
-            "iPhone" in agent || "iPad" in agent -> "iOS"
-            "Windows" in agent -> "Windows"
-            "Macintosh" in agent -> "macOS"
-            "Linux" in agent -> "Linux"
-            else -> null
-        }
-        return if (platform == null) browser else "$browser · $platform"
-    }
-
     private fun response(status: Response.Status, text: String) =
         newFixedLengthResponse(status, NanoHTTPD.MIME_PLAINTEXT, text).apply { addHeader("Cache-Control", "no-store") }
 
     override fun openWebSocket(handshake: IHTTPSession): WebSocket = Client(handshake)
 
-    override fun stop() = stopListener(clearPairing = true)
-
-    fun stopPreservingPairing() = stopListener(clearPairing = false)
-
-    private fun stopListener(clearPairing: Boolean) {
+    override fun stop() {
         viewer?.disconnect("服务已停止")
-        if (!secure && clearPairing) pairing.clear()
         timer.shutdownNow()
         super.stop()
     }
 
     private inner class Client(handshake: IHTTPSession) : WebSocket(handshake) {
-        private val token = handshake.parameters["token"]?.firstOrNull()?.takeIf { it.isNotEmpty() }
-        fun authorized() = token == null || pairing.authorized(token)
         @Volatile var lastSeen = SystemClock.elapsedRealtime()
         fun frameStalled(now: Long) = sender.frameStalled(now)
-        fun frameAvailable() = sender.frameAvailable()
         fun requestHostUi(): Boolean {
             if (ended.get() || closing.get() || viewer !== this) return false
             reply(WebStreamSender.Control.HOST_UI, """{"type":"host-ui"}""")
@@ -237,13 +121,9 @@ internal class LanWebServer(private val context: Context, private val code: Stri
         }
         private val ended = AtomicBoolean(false)
         private val closing = AtomicBoolean(false)
-        val jpegReady: Boolean
-            get() = !ended.get() && !closing.get() && WebSession.videoSource?.jpegNeeded != false && sender.readyForFrame
         private val sender = WebStreamSender(
-            latestFrame = { if (viewer === this && !closing.get() && WebSession.videoSource?.jpegNeeded != false) WebSession.frame else null },
             write = { super.sendFrame(it) },
             onFailure = { disconnect("串流连接中断") },
-            onReadyForFrame = { WebSession.notifyJpegDemand() },
             onVideoBacklog = {
                 WebSession.videoSource?.requestKeyframe(force = true)
                 logOnce("webcodecs-backlog") {
@@ -294,7 +174,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
             // WebCodecs is only exposed in a secure context, so the plain-HTTP listener cannot use it.
             if (!this@LanWebServer.secure) {
                 logOnce("webcodecs-http") {
-                    "WebCodecs selected but this viewer is on HTTP; WebCodecs needs HTTPS and there is no JPEG fallback"
+                    "WebCodecs requires HTTPS; the plain-HTTP listener does not carry video"
                 }
                 return
             }
@@ -332,13 +212,11 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                     reply(WebStreamSender.Control.WEBCODECS, """{"type":"webcodecs-stop"}""")
                 }
             }
-            sender.frameAvailable()
-            WebSession.notifyJpegDemand()
         }
 
         /**
          * Keeps a WebCodecs failure in the diagnostic report and leaves the viewer stopped.
-         * No JPEG fallback: the selected transport must fail visibly so the cause can be fixed.
+         * There is no fallback transport, so the failure must stay visible.
          */
         private fun failWebCodecs(reason: String, detail: String? = null) = synchronized(videoLock) {
             val viewer = webCodecs
@@ -367,7 +245,6 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                 reply(WebStreamSender.Control.WEBCODECS,
                     JSONObject().put("type", "webcodecs-error").put("reason", reason).toString())
             }
-            sender.frameAvailable()
         }
 
         private fun logOnce(key: String, message: () -> String) {
@@ -397,7 +274,6 @@ internal class LanWebServer(private val context: Context, private val code: Stri
         }
 
         override fun onOpen() {
-            if (!authorized()) { disconnect("配对已过期"); return }
             synchronized(this@LanWebServer) {
                 if (viewer != null || !WebSession.touch.claim(this)) {
                     reply(WebStreamSender.Control.BUSY,
@@ -427,12 +303,10 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                     reply(kind, text, if (kind == WebStreamSender.Control.AUDIO_STOP) kind to data.getInt("stream") else kind)
                 })
             }
-            sender.frameAvailable()
         }
 
         override fun onMessage(message: WebSocketFrame) {
             if (ended.get() || closing.get() || viewer !== this) return
-            if (!authorized()) { disconnect("设备已移除或配对已过期"); return }
             try {
                 if (message.opCode == WebSocketFrame.OpCode.Binary) {
                     require(message.binaryPayload.size <= 20_000)
@@ -468,7 +342,6 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                                 JSONObject().put("type", "phone-connect-result").put("message", result).toString())
                         }
                     }
-                    "ack" -> sender.acknowledge()
                     "viewport" -> {
                         val width = data.getInt("width")
                         val height = data.getInt("height")
@@ -476,12 +349,10 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                     }
                     "ping" -> {
                         reconcileVideo()
-                        val frame = WebSession.frame
-                        if (WebSession.videoSource?.technology == StreamTechnology.WEBCODECS &&
-                            WebSession.videoActive) {
+                        if (WebSession.videoActive) {
                             if (!this@LanWebServer.secure) {
                                 logOnce("webcodecs-http-status") {
-                                    "WebCodecs selected but the viewer is on HTTP; no JPEG fallback is used"
+                                    "WebCodecs requires HTTPS but this viewer is on HTTP"
                                 }
                             } else if (webCodecsConfig == null) {
                                 logOnce("webcodecs-no-config") {
@@ -492,7 +363,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                         synchronized(videoLock) { reply(WebStreamSender.Control.STATUS,
                             JSONObject().put("type", "status").put("width", WebSession.width)
                             .put("height", WebSession.height).put("stage", WebSession.stage)
-                            .put("streaming", WebSession.videoActive && (frame != null || webCodecsActive))
+                            .put("streaming", WebSession.videoActive && webCodecsActive)
                             .put("webCodecsAvailable", webCodecsConfig != null && !webCodecsAttempted &&
                                 WebSession.videoActive && this@LanWebServer.secure)
                             .put("webCodecsNeedsHttps", webCodecsConfig != null && WebSession.videoActive &&
@@ -505,7 +376,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                             .put("transport", when {
                                 webCodecsError != null -> "webcodecs-failed"
                                 webCodecsActive -> "webcodecs"
-                                else -> "jpeg"
+                                else -> "webcodecs-pending"
                             })
                             .toString()) }
                     }
@@ -525,7 +396,7 @@ internal class LanWebServer(private val context: Context, private val code: Stri
                     "webcodecs-fallback" -> {
                         val reason = data.optString("reason").take(200).ifBlank { "decoder unavailable" }
                         val detail = data.optJSONObject("detail")?.toString()
-                        // No JPEG fallback: keep the failure and its diagnostics for analysis.
+                        // Keep the failure and its diagnostics visible; there is no fallback transport.
                         failWebCodecs(reason, detail)
                     }
                     "webcodecs-unsupported" -> {

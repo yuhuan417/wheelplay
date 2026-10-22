@@ -36,8 +36,8 @@ class ServerNavigationTest {
         activity.applicationInfo.flags = activity.applicationInfo.flags or android.content.pm.ApplicationInfo.FLAG_SUPPORTS_RTL
         val output = java.io.File("build/reports/material-ui/buttons").apply { mkdirs() }
         for (direction in listOf(View.LAYOUT_DIRECTION_LTR, View.LAYOUT_DIRECTION_RTL)) {
-            val button = ServerUi(activity).button("扫描二维码配对", true,
-                com.shilapi.xcertplay.host.R.drawable.ic_server_scan) {}
+            val button = ServerUi(activity).button("启动显示", true,
+                com.shilapi.xcertplay.host.R.drawable.ic_server_launch) {}
             val container = android.widget.FrameLayout(activity).apply {
                 layoutDirection = direction
                 addView(button, android.widget.FrameLayout.LayoutParams(-1, -2))

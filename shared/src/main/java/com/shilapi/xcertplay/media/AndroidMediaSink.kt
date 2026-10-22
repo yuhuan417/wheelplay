@@ -229,9 +229,10 @@ class AndroidMediaSink(
 
     private fun startMicrophone(type: Int, config: MicrophoneConfig) {
         if (remoteAudio?.microphoneEnabled == false) return
+        // Android never captures the microphone; only a browser-provided PCM input is forwarded.
+        val input = remoteAudio?.microphone(type, config) ?: return
         val uplink = microphoneUplinks.computeIfAbsent(type) {
-            MicrophoneUplink(config, remoteAudio?.microphone(type, config),
-                microphoneCounters.getOrPut(type) { MicrophoneCounters() })
+            MicrophoneUplink(config, input, microphoneCounters.getOrPut(type) { MicrophoneCounters() })
         }
         if (!uplink.start()) microphoneUplinks.remove(type, uplink)
     }
@@ -295,11 +296,9 @@ class AndroidMediaSink(
         existing?.close()
         val isMusic = format.isMediaPlayback()
         return AudioRenderer(format, advancedAudioChannelMapping, mediaBufferMillis, onAudioDiagnostic,
-            localAllowed = { !isMusic || localMediaAllowed },
-            localRequested = {
-                val listener = localMediaRequested
-                if (isMusic && listener != null && localMediaDemandPending.compareAndSet(false, true)) listener()
-            },
+            // Android is a forwarder only: never open a local AudioTrack or request audio focus.
+            localAllowed = { false },
+            localRequested = {},
             remoteOutput = { data, offset, length ->
                 val forwarded = remoteAudio?.output(type, format, data, offset, length) == true
                 if (isMusic) {
@@ -706,7 +705,7 @@ private class AudioRenderer(
                 AudioCodecKind.OPUS -> configureCodec(MediaFormat.MIMETYPE_AUDIO_OPUS)
                 AudioCodecKind.LPCM -> Unit
             }
-            createTrack()
+            if (localAllowed()) createTrack()
             while (running) {
                 queue.poll(AUDIO_POLL_MILLIS, TimeUnit.MILLISECONDS)?.let(::handle)
                 // Output becomes ready asynchronously, including after the last packet of a burst.

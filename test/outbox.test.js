@@ -22,15 +22,15 @@ function fixture() {
 }
 const touch = (x, down = true) => ({ type: 'touch', contacts: [{ id: 0, x, y: 0.5, down }] });
 
-test('congested ACK is sent once after recovery, ahead of touches and heartbeat', () => {
+test('congested audio ACK is sent once after recovery, ahead of touches and heartbeat', () => {
   const f = fixture();
   f.outbox.send({ type: 'ping' });
   f.outbox.send(touch(0));
-  f.outbox.send({ type: 'ack' });
+  f.outbox.send({ type: 'audio-ack' });
   f.outbox.send({ type: 'ping' });
   f.advance(100); assert.equal(f.sent.length, 0); assert.equal(f.timers.size, 1);
   f.socket.bufferedAmount = 0; f.advance(110);
-  assert.deepEqual(f.sent.map(m => m.type), ['ack', 'touch', 'ping']);
+  assert.deepEqual(f.sent.map(m => m.type), ['audio-ack', 'touch', 'ping']);
   f.advance(2000); assert.equal(f.sent.length, 3); assert.equal(f.timers.size, 0);
 });
 
@@ -47,7 +47,7 @@ test('moves merge only within a gesture and down/up/release edges remain ordered
 });
 
 test('continued congestion ends the connection instead of retaining stale controls forever', () => {
-  const f = fixture(); f.outbox.send(touch(0)); f.outbox.send({ type: 'ack' });
+  const f = fixture(); f.outbox.send(touch(0)); f.outbox.send({ type: 'audio-ack' });
   f.advance(1490); assert.equal(f.failures, 0);
   f.advance(1500); assert.equal(f.failures, 1); assert.equal(f.timers.size, 0);
   f.socket.bufferedAmount = 0; f.advance(3000);
@@ -58,11 +58,11 @@ test('touch edge queue is bounded and closes on overflow', () => {
   const f = fixture();
   for (let i = 0; i < 65; i++) f.outbox.send(touch(0, i % 2 === 0));
   assert.equal(f.failures, 1); assert.equal(f.timers.size, 0);
-  assert.equal(f.outbox.send({ type: 'ack' }), false);
+  assert.equal(f.outbox.send({ type: 'audio-ack' }), false);
 });
 
 test('closing discards pending controls so they cannot leak into a replacement connection', () => {
-  const old = fixture(); old.outbox.send({ type: 'ack' }); old.outbox.send(touch(0)); old.outbox.close();
+  const old = fixture(); old.outbox.send({ type: 'audio-ack' }); old.outbox.send(touch(0)); old.outbox.close();
   const next = fixture(); next.socket.bufferedAmount = 0; next.outbox.send({ type: 'ping' });
   old.socket.bufferedAmount = 0; old.advance(100);
   assert.deepEqual(old.sent, []); assert.deepEqual(next.sent, [{ type: 'ping' }]);
@@ -72,7 +72,7 @@ test('closing discards pending controls so they cannot leak into a replacement c
 test('a send exception ends the outbox without replaying possibly accepted messages', () => {
   const f = fixture(); f.socket.bufferedAmount = 0;
   f.socket.send = () => { throw new Error('closed'); };
-  assert.equal(f.outbox.send({ type: 'ack' }), false);
+  assert.equal(f.outbox.send({ type: 'audio-ack' }), false);
   assert.equal(f.failures, 1); assert.equal(f.timers.size, 0);
 });
 
