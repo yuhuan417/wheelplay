@@ -43,6 +43,8 @@ class DiPlaySessionService : Service() {
     private var destroyed = false
     private var activationBlocked = false
     private var standby = false
+    /** Guards the delayed power-loss standby so a reconnect cancels it. */
+    private var powerLossStandbyToken = 0
     @Volatile private var radioPowerOffVerified: Boolean? = null
     private var receiverRegistered = false
     private var currentState = NowPlayingState()
@@ -55,14 +57,15 @@ class DiPlaySessionService : Service() {
             when (intent.action) {
                 Intent.ACTION_POWER_CONNECTED -> {
                     CarPlayBackgroundSession.powerDisconnected = false
+                    // A power dip that comes back before the delay cancels the standby entirely.
+                    cancelPendingPowerLossStandby()
                     if (standby || !WebSession.running || !CarPlayBackgroundSession.active) {
                         wakeFromStandby("随车通电")
                     }
                 }
                 Intent.ACTION_POWER_DISCONNECTED -> {
                     CarPlayBackgroundSession.powerDisconnected = true
-                    CarPlayBackgroundSession.requestStandby("随车断电，已进入省电待机")
-                    enterStandby()
+                    schedulePowerLossStandby()
                 }
                 BluetoothDevice.ACTION_ACL_CONNECTED -> {
                     if (CarPlayBackgroundSession.isUnpluggedOnBattery(context)) return
@@ -212,6 +215,29 @@ class DiPlaySessionService : Service() {
             }
             if (Looper.myLooper() == Looper.getMainLooper()) acquireWakeLock() else main.post { acquireWakeLock() }
         }
+    }
+
+    /**
+     * Car-charger rails dip for a second or two when the ignition is toggled and while USB power
+     * is negotiated. Entering standby on the first ACTION_POWER_DISCONNECTED tore down a live
+     * CarPlay session, Bluetooth and the hotspot for an 8 s dip, and the (slow) radio power-off
+     * then landed after the wake. Wait for the state to persist instead.
+     */
+    private fun schedulePowerLossStandby() {
+        val token = ++powerLossStandbyToken
+        main.postDelayed(
+            {
+                if (destroyed || activationBlocked || token != powerLossStandbyToken) return@postDelayed
+                if (!CarPlayBackgroundSession.powerDisconnected) return@postDelayed
+                CarPlayBackgroundSession.requestStandby("随车断电，已进入省电待机")
+                enterStandby()
+            },
+            POWER_LOSS_STANDBY_DELAY_MILLIS,
+        )
+    }
+
+    private fun cancelPendingPowerLossStandby() {
+        powerLossStandbyToken += 1
     }
 
     private fun enterStandby() {
@@ -376,6 +402,7 @@ class DiPlaySessionService : Service() {
         private const val EXTRA_COMMAND = "command"
         private const val EXTRA_GENERATION = "generation"
         private const val CHANNEL = "diplay_connection"
+    private const val POWER_LOSS_STANDBY_DELAY_MILLIS = 20_000L
         internal const val NOTIFICATION_ID = 1
     }
 }

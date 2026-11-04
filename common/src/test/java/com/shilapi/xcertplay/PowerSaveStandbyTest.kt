@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice
 import android.content.Intent
 import android.os.Looper
 import com.shilapi.xcertplay.web.WebSession
+import java.time.Duration
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,6 +33,8 @@ class PowerSaveStandbyTest {
         private lateinit var originalVerifyRadioOff: (android.content.Context) -> Boolean
         private lateinit var originalBluetoothEnabled: (android.content.Context) -> Boolean
         private lateinit var originalSetBluetoothEnabled: (android.content.Context, Boolean) -> Unit
+        private lateinit var originalWifiAssociated: (android.content.Context) -> Boolean
+        private var originalAssociationTimeoutMillis = 0L
 
         @JvmStatic
         @org.junit.BeforeClass
@@ -41,6 +44,8 @@ class PowerSaveStandbyTest {
             originalVerifyRadioOff = RootRadioPower.verifyRadioOff
             originalBluetoothEnabled = RootRadioPower.bluetoothEnabled
             originalSetBluetoothEnabled = RootRadioPower.setBluetoothEnabled
+            originalWifiAssociated = RootRadioPower.wifiAssociated
+            originalAssociationTimeoutMillis = RootRadioPower.associationTimeoutMillis
         }
 
         @JvmStatic
@@ -51,6 +56,8 @@ class PowerSaveStandbyTest {
             RootRadioPower.verifyRadioOff = originalVerifyRadioOff
             RootRadioPower.bluetoothEnabled = originalBluetoothEnabled
             RootRadioPower.setBluetoothEnabled = originalSetBluetoothEnabled
+            RootRadioPower.wifiAssociated = originalWifiAssociated
+            RootRadioPower.associationTimeoutMillis = originalAssociationTimeoutMillis
             RootRadioPower.suspendedByStandby = false
         }
     }
@@ -70,6 +77,8 @@ class PowerSaveStandbyTest {
         RootRadioPower.verifyRadioOff = { true }
         RootRadioPower.bluetoothEnabled = { true }
         RootRadioPower.setBluetoothEnabled = { _, _ -> }
+        RootRadioPower.wifiAssociated = { true }
+        RootRadioPower.associationTimeoutMillis = 100L
     }
 
     @After
@@ -77,9 +86,6 @@ class PowerSaveStandbyTest {
         WebSession.stop()
         CarPlayBackgroundSession.clear()
         RootRadioPower.suspendedByStandby = false
-        RootRadioPower.restoreWifiOnWake = false
-        RootRadioPower.restoreHotspotOnWake = false
-        RootRadioPower.restoreBluetoothOnWake = false
         RootRadioPower.lastStandbyRadioOff = null
     }
 
@@ -188,7 +194,9 @@ class PowerSaveStandbyTest {
         assertTrue(CarPlayBackgroundSession.active)
 
         app.sendBroadcast(Intent(Intent.ACTION_POWER_DISCONNECTED))
-        shadowOf(Looper.getMainLooper()).idle()
+        // The rail has to stay down past the debounce before the radio is cut; a dip that comes
+        // back first must not tear down a live session.
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(21))
 
         assertTrue(CarPlayBackgroundSession.powerDisconnected)
         assertEquals("随车断电，已进入省电待机", standbyReason)
@@ -217,11 +225,43 @@ class PowerSaveStandbyTest {
     }
 
     @Test
-    fun rootRadioPowerTurnsOffHotspotAndWifiOnStandbyAndRestoresOnWake() {
+    fun aWakeThatRacesTheSlowStandbyAbortsTheRadioPowerOff() {
         val originalAvailable = RootRadioPower.rootAvailable
         val originalExecute = RootRadioPower.executeRootScript
         val originalVerify = RootRadioPower.verifyRadioOff
-        val originalWifiUplink = RootRadioPower.wifiUplinkReady
+        val scripts = java.util.concurrent.CopyOnWriteArrayList<String>()
+        try {
+            RootRadioPower.rootAvailable = { true }
+            RootRadioPower.verifyRadioOff = { true }
+            RootRadioPower.bluetoothEnabled = { true }
+            RootRadioPower.setBluetoothEnabled = { _, _ -> }
+            RootRadioPower.wifiAssociated = { true }
+            RootRadioPower.executeRootScript = { script ->
+                scripts.add(script)
+                true
+            }
+
+            // The layout is 1 s of standby work; the wake arrives in the middle of it.
+            RootRadioPower.enterStandby(app)
+            RootRadioPower.wakeFromStandby(app)
+            Thread.sleep(1_000)
+
+            assertTrue(
+                "a standby that lost the race must not cut the radios",
+                scripts.none { it.contains("RootHotspotMain stop") },
+            )
+        } finally {
+            RootRadioPower.rootAvailable = originalAvailable
+            RootRadioPower.executeRootScript = originalExecute
+            RootRadioPower.verifyRadioOff = originalVerify
+        }
+    }
+
+    @Test
+    fun rootRadioPowerTurnsOffHotspotAndWifiOnStandbyAndPowersRadiosOnWake() {
+        val originalAvailable = RootRadioPower.rootAvailable
+        val originalExecute = RootRadioPower.executeRootScript
+        val originalVerify = RootRadioPower.verifyRadioOff
         val scripts = java.util.concurrent.CopyOnWriteArrayList<String>()
         val bluetoothEvents = java.util.concurrent.CopyOnWriteArrayList<Boolean>()
         val standbyExecuted = java.util.concurrent.CountDownLatch(1)
@@ -229,11 +269,9 @@ class PowerSaveStandbyTest {
         try {
             RootRadioPower.rootAvailable = { true }
             RootRadioPower.verifyRadioOff = { true }
-        RootRadioPower.bluetoothEnabled = { true }
-        RootRadioPower.setBluetoothEnabled = { _, _ -> }
-            RootRadioPower.wifiUplinkReady = { true }
             RootRadioPower.bluetoothEnabled = { true }
             RootRadioPower.setBluetoothEnabled = { _, enabled -> bluetoothEvents += enabled }
+            RootRadioPower.wifiAssociated = { true }
             RootRadioPower.executeRootScript = { script ->
                 scripts.add(script)
                 if (script.contains("RootHotspotMain stop")) standbyExecuted.countDown()
@@ -242,8 +280,11 @@ class PowerSaveStandbyTest {
             }
 
             RootRadioPower.enterStandby(app)
-            RootRadioPower.wakeFromStandby(app)
             val sawStandby = standbyExecuted.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            // Let the standby worker finish before waking: this test covers the ordered case, the
+            // racing case has its own test below.
+            Thread.sleep(300)
+            RootRadioPower.wakeFromStandby(app)
             val sawWake = wakeExecuted.await(5, java.util.concurrent.TimeUnit.SECONDS)
             if (!sawStandby || !sawWake) {
                 System.err.println("DEBUG standby=$sawStandby wake=$sawWake scripts=${scripts.size}:")
@@ -256,18 +297,53 @@ class PowerSaveStandbyTest {
             assertTrue(standbyScript.contains("cmd wifi stop-softap"))
             assertTrue(standbyScript.contains("cmd wifi set-wifi-enabled disabled"))
 
-            val hotspotIndex = scripts.indexOfFirst { it.contains("RootHotspotMain start") }
-            assertTrue("hotspot wake script must exist", hotspotIndex >= 0)
-            val wifiIndex = scripts.indexOfFirst { it.contains("cmd wifi set-wifi-enabled enabled") }
-            assertTrue("Wi-Fi must be enabled", wifiIndex >= 0)
-            assertTrue("Wi-Fi must be enabled before the hotspot starts", wifiIndex < hotspotIndex)
+            // Wi-Fi and Bluetooth come up first; the hotspot waits for the STA association so the
+            // AP can be created on the channel the STA already uses.
+            val wifiScript = scripts.single { it.contains("cmd wifi set-wifi-enabled enabled") }
+            val hotspotScript = scripts.single { it.contains("RootHotspotMain start") }
+            assertTrue("Wi-Fi and Bluetooth must start together", wifiScript.contains("svc bluetooth enable"))
+            assertTrue("the hotspot must not follow in the first pass", !wifiScript.contains("RootHotspotMain start"))
+            assertTrue(hotspotScript.contains("cmd connectivity tether start wifi"))
+            assertTrue(
+                "the hotspot must start only after Wi-Fi is enabled",
+                scripts.indexOf(wifiScript) < scripts.indexOf(hotspotScript),
+            )
             assertTrue("standby must disable Bluetooth", false in bluetoothEvents)
             assertTrue("wake must re-enable Bluetooth", true in bluetoothEvents)
         } finally {
             RootRadioPower.rootAvailable = originalAvailable
             RootRadioPower.executeRootScript = originalExecute
             RootRadioPower.verifyRadioOff = originalVerify
-            RootRadioPower.wifiUplinkReady = originalWifiUplink
+            RootRadioPower.suspendedByStandby = false
+        }
+    }
+
+    @Test
+    fun hotspotStillStartsWhenTheStaNeverAssociates() {
+        val originalAvailable = RootRadioPower.rootAvailable
+        val originalExecute = RootRadioPower.executeRootScript
+        val executed = java.util.concurrent.CountDownLatch(1)
+        try {
+            RootRadioPower.rootAvailable = { true }
+            RootRadioPower.wifiAssociated = { false }
+            RootRadioPower.associationTimeoutMillis = 100L
+            RootRadioPower.executeRootScript = { script ->
+                if (script.contains("RootHotspotMain start")) executed.countDown()
+                true
+            }
+
+            // A power cycle always starts from standby, so the wake runs even when Robolectric
+            // reports the radios as already on.
+            RootRadioPower.enterStandby(app)
+            RootRadioPower.wakeFromStandby(app)
+
+            assertTrue(
+                "the hotspot must start even without an uplink",
+                executed.await(5, java.util.concurrent.TimeUnit.SECONDS),
+            )
+        } finally {
+            RootRadioPower.rootAvailable = originalAvailable
+            RootRadioPower.executeRootScript = originalExecute
             RootRadioPower.suspendedByStandby = false
         }
     }

@@ -23,17 +23,19 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Uses Root (`su`) during power-save standby to completely power down the system Wi-Fi radio,
- * Wi-Fi hotspot (SoftAP / Tethering / MIUI WLAN bridge) and Bluetooth, and restores them upon
- * waking when external power returns.
+ * Wi-Fi hotspot (SoftAP / Tethering / MIUI WLAN bridge) and Bluetooth, and powers them back on
+ * when external power returns.
+ *
+ * Bluetooth and Wi-Fi come up immediately. The hotspot is created only after the Wi-Fi STA has
+ * associated (or the bounded wait expires), because a single-radio device has to run the AP on the
+ * STA channel: creating it earlier makes the framework retune the AP when the STA connects.
  */
 internal object RootRadioPower {
     private const val TAG = "xcertplay-usb"
     private const val TETHERING_WIFI = 0
     private const val STANDBY_DEBOUNCE_MILLIS = 3_000L
-    private const val WIFI_UPLINK_TIMEOUT_MILLIS = 30_000L
-    private const val WIFI_UPLINK_POLL_MILLIS = 250L
-    private const val BLUETOOTH_WAKE_TIMEOUT_MILLIS = 10_000L
-    private const val BLUETOOTH_WAKE_POLL_MILLIS = 250L
+    private const val WIFI_ASSOCIATION_POLL_MILLIS = 250L
+    private const val WIFI_ASSOCIATION_LOG_INTERVAL_MILLIS = 2_000L
     private const val RADIO_OFF_CHECKS = 3
     private const val RADIO_OFF_RECHECK_MILLIS = 500L
     private const val SHELL_PATH =
@@ -57,16 +59,6 @@ internal object RootRadioPower {
     @Volatile
     internal var suspendedByStandby = false
 
-    @Volatile
-    internal var restoreWifiOnWake = false
-
-    @Volatile
-    internal var restoreHotspotOnWake = false
-
-    /** Bluetooth was enabled when power was cut; turn it back on after the radio wake. */
-    @Volatile
-    internal var restoreBluetoothOnWake = false
-
     /** Last verified outcome of the standby teardown; null until a standby request completes. */
     @Volatile
     internal var lastStandbyRadioOff: Boolean? = null
@@ -75,7 +67,7 @@ internal object RootRadioPower {
     @Volatile
     private var lastStandbyRequestAt = 0L
 
-    /** Aborts a Wi-Fi uplink wait as soon as power is cut again. */
+    /** Aborts the association wait (and the deferred hotspot start) when power is cut again. */
     private val wakeGeneration = AtomicInteger(0)
 
     /**
@@ -97,10 +89,6 @@ internal object RootRadioPower {
     @Volatile
     internal var verifyRadioOff: (Context) -> Boolean = ::defaultVerifyRadioOff
 
-    /** Test seam for the pre-hotspot check that a Wi-Fi uplink is actually connected. */
-    @Volatile
-    internal var wifiUplinkReady: (Context) -> Boolean = WifiUplink::isReady
-
     /** Test seams so unit tests do not touch the real Bluetooth stack. */
     @Volatile
     internal var bluetoothEnabled: (Context) -> Boolean = ::defaultBluetoothEnabled
@@ -108,15 +96,22 @@ internal object RootRadioPower {
     @Volatile
     internal var setBluetoothEnabled: (Context, Boolean) -> Unit = ::defaultSetBluetoothEnabled
 
+    /** Test seam for the pre-hotspot check that the Wi-Fi STA is associated (channel fixed). */
+    @Volatile
+    internal var wifiAssociated: (Context) -> Boolean = WifiUplink::isAssociated
+
+    /** Maximum time the hotspot start waits for the STA association; overridable in tests. */
+    @Volatile
+    internal var associationTimeoutMillis = 10_000L
+
     fun enterStandby(context: Context, onComplete: ((Boolean) -> Unit)? = null) {
-        wakeGeneration.incrementAndGet()
+        // A wake may arrive while the (slow) root power-off script is still running; the captured
+        // generation lets the worker notice and step aside instead of tearing down the radios of a
+        // device that has already woken up.
+        val generation = wakeGeneration.incrementAndGet()
         val appContext = context.applicationContext
-        // The only CarPlay transport is wireless and uses the configured manual hotspot.
-        restoreWifiOnWake = true
-        restoreHotspotOnWake = true
         val bluetoothWasEnabled = runCatching { bluetoothEnabled(appContext) }.getOrDefault(false)
         val duplicate = synchronized(this) {
-            if (!suspendedByStandby) restoreBluetoothOnWake = bluetoothWasEnabled
             val now = SystemClock.elapsedRealtime()
             val duplicate = suspendedByStandby && now - lastStandbyRequestAt < STANDBY_DEBOUNCE_MILLIS
             lastStandbyRequestAt = now
@@ -131,7 +126,11 @@ internal object RootRadioPower {
         worker.execute {
             var radioOff = false
             try {
-                if (restoreBluetoothOnWake) {
+                if (wakeGeneration.get() != generation) {
+                    log("Standby aborted: the device woke before the radio power-off started")
+                    return@execute
+                }
+                if (bluetoothWasEnabled) {
                     runCatching { setBluetoothEnabled(appContext, false) }
                         .onFailure { log("Standby Bluetooth disable failed: ${it.message}") }
                 }
@@ -148,6 +147,10 @@ internal object RootRadioPower {
                         "exit 0",
                 )
                 runCatching { BinderRadioControl.stopHotspotAndWifi(appContext, packageName) }
+                if (wakeGeneration.get() != generation) {
+                    log("Standby aborted after the framework calls: the device woke")
+                    return@execute
+                }
                 val script = buildStandbyScript(apkPath, packageName)
                 val ok = executeRootScript(script)
                 runCatching { BinderRadioControl.stopHotspotAndWifi(appContext, packageName) }
@@ -160,9 +163,13 @@ internal object RootRadioPower {
                     radioOff = awaitRadioOff(appContext)
                 }
                 log(
-                    "Standby radio power-off executed (script=$ok, radioOff=$radioOff, " +
-                        "restoreWifi=$restoreWifiOnWake, restoreHotspot=$restoreHotspotOnWake)",
+                    "Standby radio power-off executed (script=$ok, radioOff=$radioOff)",
                 )
+                if (wakeGeneration.get() != generation) {
+                    // The power-off landed after the wake; put the radios back.
+                    log("Standby raced with a wake; restoring radios")
+                    wakeFromStandby(appContext)
+                }
             } catch (error: Throwable) {
                 log("Standby radio power-off failed: ${error.javaClass.simpleName}: ${error.message}")
             } finally {
@@ -197,99 +204,114 @@ internal object RootRadioPower {
     fun wakeFromStandby(context: Context, onComplete: (() -> Unit)? = null) {
         val generation = wakeGeneration.incrementAndGet()
         val appContext = context.applicationContext
-        val needWifi = true
-        val needHotspot = true
         val wasSuspended = suspendedByStandby
         suspendedByStandby = false
 
         worker.execute {
             try {
-                if (restoreBluetoothOnWake) {
-                    runCatching { setBluetoothEnabled(appContext, true) }
-                        .onFailure { log("Wake Bluetooth enable failed: ${it.message}") }
-                }
-                if (!rootAvailable()) {
-                    if (restoreBluetoothOnWake) {
-                        log("Wake Bluetooth requested without root; adapter fallback used")
-                    }
-                    return@execute
-                }
                 val wifiOff = runCatching {
                     appContext.getSystemService(WifiManager::class.java)?.isWifiEnabled == false
                 }.getOrDefault(false)
                 val hotspotOff = runCatching { CarHotspotStatus.isEnabled(appContext) == false }.getOrDefault(true)
-                if (!wasSuspended && !wifiOff && !(needHotspot && hotspotOff)) return@execute
+                val bluetoothOff = runCatching { !bluetoothEnabled(appContext) }.getOrDefault(true)
+                if (!wasSuspended && !wifiOff && !hotspotOff && !bluetoothOff) {
+                    log("Wake radio power-on skipped: Wi-Fi, hotspot and Bluetooth are already on")
+                    return@execute
+                }
+
+                // Bluetooth has an in-process API, so it does not depend on root.
+                runCatching { setBluetoothEnabled(appContext, true) }
+                    .onFailure { log("Wake Bluetooth enable failed: ${it.message}") }
+                if (!rootAvailable()) {
+                    log("Wake Wi-Fi/hotspot power-on skipped: root is not available")
+                    return@execute
+                }
 
                 val apkPath = appContext.applicationInfo?.sourceDir.orEmpty()
                 val packageName = appContext.packageName
 
-                // Phase 1: bring the Wi-Fi uplink up and wait for it to actually connect. Starting
-                // the SoftAP before the STA association exists makes clients (Tesla, iPhone) see a
-                // hotspot without internet and reject or leave it.
-                val wifiScriptOk = if (needWifi) {
-                    executeRootScript(
-                        buildWakeScript(
-                            apkPath = apkPath,
-                            packageName = packageName,
+                // Phase 1: Wi-Fi and Bluetooth immediately. The hotspot waits for the STA
+                // association because the AP has to share the STA channel on this radio.
+                val wifiScriptOk = executeRootScript(
+                    buildWakeScript(
+                        apkPath = apkPath,
+                        packageName = packageName,
+                        enableWifi = true,
+                        enableHotspot = false,
+                        enableBluetooth = true,
+                    ),
+                ).also {
+                    runCatching {
+                        BinderRadioControl.startWifiAndHotspot(
+                            context = appContext,
+                            callerPkg = packageName,
                             enableWifi = true,
                             enableHotspot = false,
-                            enableBluetooth = restoreBluetoothOnWake,
-                        ),
-                    ).also {
-                        runCatching {
-                            BinderRadioControl.startWifiAndHotspot(
-                                context = appContext,
-                                callerPkg = packageName,
-                                enableWifi = true,
-                                enableHotspot = false,
-                            )
-                        }
+                        )
                     }
-                } else {
-                    true
                 }
-                val wifiReady = if (needWifi) awaitWifiUplink(appContext, generation) else true
-                if (needWifi) {
-                    log("Wake Wi-Fi uplink ready=$wifiReady (script=$wifiScriptOk)")
-                }
-                val bluetoothReady = if (restoreBluetoothOnWake) {
-                    awaitBluetoothEnabled(appContext, generation)
-                } else {
-                    true
-                }
-                if (restoreBluetoothOnWake) {
-                    log("Wake Bluetooth ready=$bluetoothReady")
+                val associated = awaitWifiAssociation(appContext, generation)
+                log("Wake Wi-Fi association ready=$associated (wifiScript=$wifiScriptOk)")
+                if (generation != wakeGeneration.get()) {
+                    log("Wake aborted before starting the hotspot")
+                    return@execute
                 }
 
-                // Phase 2: only now start tethering/SoftAP.
-                val hotspotScriptOk = if (needHotspot) {
-                    executeRootScript(
-                        buildWakeScript(
-                            apkPath = apkPath,
-                            packageName = packageName,
+                // Phase 2: the STA channel is settled (or the bounded wait expired), so the AP can
+                // be created on it without a later channel switch.
+                val hotspotScriptOk = executeRootScript(
+                    buildWakeScript(
+                        apkPath = apkPath,
+                        packageName = packageName,
+                        enableWifi = false,
+                        enableHotspot = true,
+                    ),
+                ).also {
+                    runCatching {
+                        BinderRadioControl.startWifiAndHotspot(
+                            context = appContext,
+                            callerPkg = packageName,
                             enableWifi = false,
                             enableHotspot = true,
-                        ),
-                    ).also {
-                        runCatching {
-                            BinderRadioControl.startWifiAndHotspot(
-                                context = appContext,
-                                callerPkg = packageName,
-                                enableWifi = false,
-                                enableHotspot = true,
-                            )
-                        }
+                        )
                     }
-                } else {
-                    true
                 }
                 log(
                     "Wake radio power-on executed (wifiScript=$wifiScriptOk " +
-                        "hotspotScript=$hotspotScriptOk wifiReady=$wifiReady " +
-                        "bluetoothReady=$bluetoothReady wifi=$needWifi hotspot=$needHotspot)",
+                        "hotspotScript=$hotspotScriptOk associationReady=$associated)",
                 )
             } finally {
                 onComplete?.invoke()
+            }
+        }
+    }
+
+    /**
+     * Waits for the STA association, which fixes the channel the AP must use. Returns false when
+     * the wait expired, was interrupted or was cancelled by a new standby request; the caller
+     * starts the hotspot anyway, because a hotspot without an uplink is still usable for the car.
+     */
+    private fun awaitWifiAssociation(context: Context, generation: Int): Boolean {
+        if (runCatching { wifiAssociated(context) }.getOrDefault(false)) return true
+        // System.nanoTime() is monotonic on the device and keeps advancing under Robolectric,
+        // where the simulated SystemClock would otherwise leave this loop without a deadline.
+        val startNanos = System.nanoTime()
+        val timeoutMillis = associationTimeoutMillis.coerceAtLeast(0)
+        var lastLog = 0L
+        while (true) {
+            if (generation != wakeGeneration.get()) return false
+            if (runCatching { wifiAssociated(context) }.getOrDefault(false)) return true
+            val elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000
+            if (elapsedMillis >= timeoutMillis) return false
+            if (elapsedMillis - lastLog >= WIFI_ASSOCIATION_LOG_INTERVAL_MILLIS) {
+                lastLog = elapsedMillis
+                log("Waiting for the Wi-Fi STA association before starting the hotspot")
+            }
+            try {
+                Thread.sleep(minOf(WIFI_ASSOCIATION_POLL_MILLIS, (timeoutMillis - elapsedMillis).coerceAtLeast(1)))
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
             }
         }
     }
@@ -370,22 +392,6 @@ internal object RootRadioPower {
         appendLine("exit 0")
     }
 
-    private fun awaitBluetoothEnabled(context: Context, generation: Int): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + BLUETOOTH_WAKE_TIMEOUT_MILLIS
-        while (SystemClock.elapsedRealtime() < deadline) {
-            if (generation != wakeGeneration.get()) return false
-            if (runCatching { bluetoothEnabled(context) }.getOrDefault(false)) return true
-            try {
-                Thread.sleep(BLUETOOTH_WAKE_POLL_MILLIS)
-            } catch (interrupted: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return false
-            }
-        }
-        return generation == wakeGeneration.get() &&
-            runCatching { bluetoothEnabled(context) }.getOrDefault(false)
-    }
-
     private fun defaultBluetoothEnabled(context: Context): Boolean = runCatching {
         context.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
     }.getOrDefault(false)
@@ -395,27 +401,6 @@ internal object RootRadioPower {
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: return
         runCatching { if (enabled) adapter.enable() else adapter.disable() }
             .onFailure { log("Bluetooth adapter ${if (enabled) "enable" else "disable"} failed: ${it.message}") }
-    }
-
-    private fun awaitWifiUplink(context: Context, generation: Int): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + WIFI_UPLINK_TIMEOUT_MILLIS
-        var lastLog = 0L
-        while (SystemClock.elapsedRealtime() < deadline) {
-            if (generation != wakeGeneration.get()) return false
-            if (wifiUplinkReady(context)) return true
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastLog >= 5_000L) {
-                lastLog = now
-                log("Waiting for the Wi-Fi uplink before starting the hotspot")
-            }
-            try {
-                Thread.sleep(WIFI_UPLINK_POLL_MILLIS)
-            } catch (interrupted: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return false
-            }
-        }
-        return generation == wakeGeneration.get() && wifiUplinkReady(context)
     }
 
     private fun defaultExecuteRootScript(script: String): Boolean = try {
