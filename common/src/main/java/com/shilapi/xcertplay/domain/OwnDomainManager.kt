@@ -54,8 +54,46 @@ internal object OwnDomainManager {
     private const val TAG = "wheelplay-domain"
     private const val RENEW_BEFORE_MILLIS = 30L * 24 * 60 * 60 * 1000
     private const val CHECK_INTERVAL_MILLIS = 6L * 60 * 60 * 1000
-    private const val RETRY_MIN_MILLIS = 2L * 60 * 1000
+    /** First retry after any failure: a fresh uplink usually only needs a moment to settle. */
+    private const val RETRY_MIN_MILLIS = 60L * 1000
+    /** DNS/connect/timeout failures clear up quickly, so they back off gently. */
+    private const val RETRY_TRANSIENT_MAX_MILLIS = 10L * 60 * 1000
+    /** TLS resets and ACME rejections usually need a network-level fix; keep them rare. */
     private const val RETRY_MAX_MILLIS = 30L * 60 * 1000
+
+    private val TRANSIENT_MARKERS = listOf(
+        "resolve host",
+        "UnknownHost",
+        "unable to resolve",
+        "no address associated",
+        "timed out",
+        "timeout",
+        "ConnectException",
+        "Connection refused",
+        "network is unreachable",
+        "No route to host",
+        "SocketException",
+        "Socket closed",
+    )
+
+    /**
+     * Whether a failure is likely to clear on its own once the new uplink settles (DNS not ready
+     * yet, TCP just came up) rather than needing human intervention (TLS reset, ACME problem).
+     */
+    internal fun isTransientFailure(message: String): Boolean =
+        TRANSIENT_MARKERS.any { message.contains(it, ignoreCase = true) }
+
+    /** Backoff for the n-th consecutive failure, starting at [RETRY_MIN_MILLIS]. */
+    internal fun retryDelayMillis(consecutiveFailures: Int, transient: Boolean): Long {
+        val steps = if (transient) {
+            longArrayOf(60_000L, 120_000L, 300_000L, 600_000L)
+        } else {
+            longArrayOf(60_000L, 300_000L, 900_000L, 1_800_000L)
+        }
+        val index = (consecutiveFailures - 1).coerceIn(0, steps.lastIndex)
+        val cap = if (transient) RETRY_TRANSIENT_MAX_MILLIS else RETRY_MAX_MILLIS
+        return steps[index].coerceAtMost(cap)
+    }
     private const val RECORD_REFRESH_MILLIS = 6L * 60 * 60 * 1000
     private const val DEBOUNCE_MILLIS = 30_000L
     private const val INTERNET_WAIT_MILLIS = 60_000L
@@ -69,6 +107,7 @@ internal object OwnDomainManager {
     @Volatile private var nextCheckAt = 0L
     @Volatile private var lastRunAt = 0L
     @Volatile private var consecutiveFailures = 0
+    @Volatile private var lastAttemptedAddress: String? = null
 
     fun ensureStarted(context: Context) {
         val app = context.applicationContext
@@ -121,6 +160,14 @@ internal object OwnDomainManager {
             // DuckDNS is the DNS/certificate part of Tesla compatibility: publish the same
             // access address the car already uses for the HTTP/HTTPS listener.
             val address = TeslaHttpCompatibility.config(context).address
+            // A new uplink restarts the backoff: the previous failures were about the old network.
+            if (address != lastAttemptedAddress) {
+                if (lastAttemptedAddress != null && consecutiveFailures > 0) {
+                    log("access address changed; retry backoff reset")
+                }
+                consecutiveFailures = 0
+                lastAttemptedAddress = address
+            }
             status = Status("检查中", "正在检查 DuckDNS 解析与证书", config.domain, address)
             val networks = awaitInternetNetworks(context)
             if (networks.isEmpty()) {
@@ -213,8 +260,8 @@ internal object OwnDomainManager {
                 lastError = message,
             )
             consecutiveFailures = (consecutiveFailures + 1).coerceAtMost(20)
-            val retryDelay = (RETRY_MIN_MILLIS shl (consecutiveFailures - 1))
-                .coerceAtMost(RETRY_MAX_MILLIS)
+            val transient = isTransientFailure(message)
+            val retryDelay = retryDelayMillis(consecutiveFailures, transient)
             nextCheckAt = System.currentTimeMillis() + retryDelay
             log("retrying in ${retryDelay / 1000}s")
             scheduler.schedule(
