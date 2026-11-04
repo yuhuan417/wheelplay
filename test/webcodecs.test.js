@@ -30,10 +30,13 @@ function framePacket({ keyframe = false, ptsUs = 1000, data = new Uint8Array([0,
 
 function fakeDecoder() {
   const decoder = {
-    state: 'unconfigured', decodeQueueSize: 0, config: null, chunks: [], closed: false,
-    configure(config) { decoder.config = config; decoder.state = 'configured'; },
-    decode(chunk) { decoder.chunks.push(chunk); },
-    reset() { decoder.chunks = []; },
+    state: 'unconfigured', decodeQueueSize: 0, config: null, configureCalls: 0, resetCalls: 0, chunks: [], closed: false,
+    configure(config) { decoder.config = config; decoder.configureCalls += 1; decoder.state = 'configured'; },
+    decode(chunk) {
+      assert.equal(decoder.state, 'configured', "decode requires a configured decoder");
+      decoder.chunks.push(chunk);
+    },
+    reset() { decoder.resetCalls += 1; decoder.chunks = []; decoder.decodeQueueSize = 0; decoder.state = 'unconfigured'; },
     close() { decoder.closed = true; decoder.state = 'closed'; },
   };
   return decoder;
@@ -153,6 +156,29 @@ test('a stalled decoder asks for keyframes and is closed without touching other 
   f.tick(2000, 24001);
   assert.deepEqual(f.errors, ['no decoded frame']);
   assert.equal(f.receiver.active, false);
+  f.receiver.close();
+});
+
+test('queue recovery drops frames until the queue drains and a fresh keyframe arrives', () => {
+  const f = fixture();
+  f.receiver.receive(configPacket());
+  assert.equal(f.decoder.configureCalls, 1);
+
+  f.decoder.decodeQueueSize = 17;
+  f.receiver.receive(framePacket({ keyframe: true }));
+  assert.equal(f.decoder.state, 'configured');
+  assert.equal(f.decoder.resetCalls, 0, 'queue recovery does not reset the decoder');
+  assert.equal(f.decoder.configureCalls, 1, 'the decoder keeps its initial configuration');
+  assert.equal(f.decoder.chunks.length, 0, 'the overloaded keyframe is discarded');
+  assert.ok(f.sent.some(message => message.type === 'webcodecs-keyframe'));
+  f.receiver.receive(framePacket({ ptsUs: 1500 }));
+  assert.equal(f.decoder.chunks.length, 0, 'dependent deltas are dropped while waiting for a keyframe');
+
+  f.decoder.decodeQueueSize = 0;
+  f.receiver.receive(framePacket({ keyframe: true, ptsUs: 2000 }));
+  assert.equal(f.decoder.chunks.length, 1);
+  assert.equal(f.decoder.chunks[0].type, 'key');
+  assert.deepEqual(f.errors, []);
   f.receiver.close();
 });
 

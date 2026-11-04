@@ -41,6 +41,13 @@ object AirPlayPersistence {
     private const val KEY_PHYSICAL_SIZE_BASIS = "display_physical_size_basis"
     private const val KEY_MAX_DETECTED_WIDTH = "display_max_detected_width"
     private const val KEY_MAX_DETECTED_HEIGHT = "display_max_detected_height"
+    private const val KEY_LAST_DISPLAY_WIDTH = "display_last_width"
+    private const val KEY_LAST_DISPLAY_HEIGHT = "display_last_height"
+    // Same bounds the browser viewport is validated against, so a stored size is always usable.
+    private const val MIN_DISPLAY_PIXELS = 320
+    private const val MAX_DISPLAY_PIXELS = 8192
+    private const val MIN_DISPLAY_ASPECT = 0.5
+    private const val MAX_DISPLAY_ASPECT = 4.0
     private const val KEY_RIGHT_HAND_DRIVE = "right_hand_drive"
     private const val KEY_HIDE_TOP_BAR = "hide_top_bar"
     private const val KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar"
@@ -318,6 +325,33 @@ object AirPlayPersistence {
             .putInt(KEY_MAX_DETECTED_WIDTH, widthPixels.coerceAtLeast(0))
             .putInt(KEY_MAX_DETECTED_HEIGHT, heightPixels.coerceAtLeast(0))
             .apply()
+    }
+
+    /**
+     * The display size of the last successful handshake. Reusing it avoids starting at the
+     * 1280x720 fallback and restarting when the same car browser reports its viewport again.
+     */
+    fun loadLastDisplaySize(context: Context): Pair<Int, Int>? {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val width = prefs.getInt(KEY_LAST_DISPLAY_WIDTH, 0)
+        val height = prefs.getInt(KEY_LAST_DISPLAY_HEIGHT, 0)
+        if (!isUsableDisplaySize(width, height)) return null
+        return width to height
+    }
+
+    fun saveLastDisplaySize(context: Context, widthPixels: Int, heightPixels: Int) {
+        if (!isUsableDisplaySize(widthPixels, heightPixels)) return
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_LAST_DISPLAY_WIDTH, widthPixels)
+            .putInt(KEY_LAST_DISPLAY_HEIGHT, heightPixels)
+            .apply()
+    }
+
+    private fun isUsableDisplaySize(width: Int, height: Int): Boolean {
+        if (width !in MIN_DISPLAY_PIXELS..MAX_DISPLAY_PIXELS) return false
+        if (height !in MIN_DISPLAY_PIXELS..MAX_DISPLAY_PIXELS) return false
+        if (width % 2 != 0 || height % 2 != 0) return false
+        return width.toDouble() / height in MIN_DISPLAY_ASPECT..MAX_DISPLAY_ASPECT
     }
 
     fun loadRightHandDrive(context: Context): Boolean =

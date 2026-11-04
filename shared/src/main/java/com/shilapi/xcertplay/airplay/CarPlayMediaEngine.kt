@@ -97,14 +97,24 @@ class CarPlayMediaEngine(
                 override fun onFrame(frame: CompressedVideoFrame, pts: Long, receivedAtNs: Long, decryptNs: Long) =
                     sink.onVideoFrame(type, frame, pts, receivedAtNs, decryptNs)
                 override fun onClosed(cause: Throwable?) {
+                    val reason = cause?.message ?: "peer EOF"
+                    // The audio stream rides its own UDP ports and the session's control socket is
+                    // still healthy. Closing the session here would drop the iPhone's audio and
+                    // make iOS tear the whole CarPlay link down, so only the screen goes away; a
+                    // new SETUP rebuilds it and keeps the existing audio stream untouched.
                     Log.w(
                         TAG,
-                        "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
+                        "screen stream ended type=$type reason=$reason; keeping the AirPlay session for audio",
                     )
+                    runCatching {
+                        session.logDebug(
+                            "Video: screen stream ended ($reason); keeping the AirPlay session for audio",
+                        )
+                    }
                     if (streams.remove(streamKey, screen)) {
                         sink.onScreenStreamActive(type, false)
                     }
-                    session.close()
+                    screen.close()
                 }
             },
         )

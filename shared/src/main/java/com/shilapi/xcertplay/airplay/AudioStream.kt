@@ -91,7 +91,15 @@ class AudioStream(
                     stats.reading()
                     socket.receive(packet)
                 } catch (_: Exception) {
-                    if (closed.get()) return else continue
+                    if (closed.get()) return
+                    // A socket that keeps failing must not spin this thread: it also decodes the
+                    // audio the iPhone judges the link by.
+                    try {
+                        Thread.sleep(RECEIVE_ERROR_BACKOFF_MILLIS)
+                    } catch (_: InterruptedException) {
+                        return
+                    }
+                    continue
                 }
                 stats.received(packet.length, if (packet.length >= 12)
                     ((buffer[2].toInt() and 0xff) shl 8) or (buffer[3].toInt() and 0xff) else null)
@@ -194,6 +202,7 @@ class AudioStream(
     private companion object {
         const val TAG = "xcertplay-usb"
         const val DATAGRAM_BYTES = 4_096
+        const val RECEIVE_ERROR_BACKOFF_MILLIS = 2L
         const val RTP_HEADER_LEN = 12
         const val TAG_LEN = 16
         const val NONCE_LEN = 8

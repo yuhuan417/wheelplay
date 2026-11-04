@@ -326,7 +326,8 @@ export function createWebCodecsReceiver(canvas, {
     lastPtsUs = message.ptsUs;
     lastFrameBytes = data.length;
     if ((decoder.decodeQueueSize || 0) > 16) {
-      try { decoder.reset(); } catch (_) {}
+      // Let queued work drain naturally. Dropped inter frames make the stream dependent
+      // on the next random-access frame, so do not resume until a fresh keyframe arrives.
       needKeyframe = true;
       stats.dropped += 1;
       send({ type: 'webcodecs-keyframe' });

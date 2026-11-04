@@ -1,8 +1,13 @@
 package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.math.BigInteger
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -65,7 +70,57 @@ class CarPlayMediaEngineTest {
         assertTrue(streams.isEmpty())
     }
 
-    private fun testSession(): AirPlaySession = AirPlaySession(
+    @Test
+    fun screenStreamEndKeepsTheAirPlaySessionAliveForAudio() {
+        val events = mutableListOf<Pair<Int, Boolean>>()
+        val screenEnded = CountDownLatch(1)
+        val sink = object : MediaSink {
+            override fun onScreenStreamActive(type: Int, active: Boolean) {
+                synchronized(events) { events += type to active }
+                if (!active) screenEnded.countDown()
+            }
+        }
+        val sessionEnded = AtomicInteger()
+        val session = testSession(
+            object : AirPlaySessionListener {
+                override fun onSessionEnded(session: AirPlaySession) {
+                    sessionEnded.incrementAndGet()
+                }
+            },
+        )
+        // The engine derives each stream key from the pair-verify shared secret.
+        PairVerify::class.java.getDeclaredField("sharedSecret").apply { isAccessible = true }
+            .set(session.pairVerify, ByteArray(32) { 1 })
+
+        try {
+            val engine = CarPlayMediaEngine(sink)
+            val port = engine.onScreen(
+                session,
+                type = 110,
+                stream = linkedMapOf<String, Any?>("streamConnectionID" to 42L),
+            )
+            assertTrue("the screen stream must listen", port != null && port > 0)
+
+            // The iPhone dropped its video connection. Audio rides its own UDP ports, so this
+            // must not end the AirPlay session.
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), port!!), 2_000)
+            }
+
+            assertTrue(
+                "screen stream teardown must be reported",
+                screenEnded.await(5, TimeUnit.SECONDS),
+            )
+            assertEquals(0, sessionEnded.get())
+            assertEquals(listOf(110 to true, 110 to false), events)
+        } finally {
+            session.close()
+        }
+    }
+
+    private fun testSession(
+        listener: AirPlaySessionListener = object : AirPlaySessionListener {},
+    ): AirPlaySession = AirPlaySession(
         socket = Socket(),
         config = AirPlayConfig(
             deviceName = "test",
@@ -77,7 +132,7 @@ class CarPlayMediaEngineTest {
         identity = AirPlayIdentity.generate(),
         pairings = PairingStore(),
         mfi = null,
-        listener = object : AirPlaySessionListener {},
+        listener = listener,
         media = object : AirPlayMediaHandler {},
     )
 }
