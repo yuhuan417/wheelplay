@@ -23,6 +23,8 @@ enum class Iap2TraceDirection(val label: String) {
  */
 object Iap2FrameFormatter {
     private const val MAX_PARAMETERS = 80
+    /** Endpoints whose bodies carry Wi-Fi credentials. */
+    private val CREDENTIAL_ENDPOINTS = setOf(0x5703, 0x5701)
     private const val MAX_STRING_CHARS = 240
     private const val MAX_HEX_BYTES = 24
 
@@ -50,6 +52,19 @@ object Iap2FrameFormatter {
             )
         }
         lines += "  raw-body=${hexPreview(frame.payload)}"
+        if (frame.messageId in CREDENTIAL_ENDPOINTS) {
+            // The trace reaches logcat and the diagnostic log file; never print a passphrase.
+            val masked = lines.map { line ->
+                when {
+                    line.contains("raw-body=") -> "  raw-body=<redacted: carries credentials>"
+                    line.contains("passphrase", ignoreCase = true) || line.contains("SSID", ignoreCase = true) ->
+                        line.substringBefore(':') + ": <redacted>"
+                    else -> line
+                }
+            }
+            lines.clear()
+            lines += masked
+        }
 
         val endpointText = endpoint?.let { " ${it.name}" }.orEmpty()
         return buildString {

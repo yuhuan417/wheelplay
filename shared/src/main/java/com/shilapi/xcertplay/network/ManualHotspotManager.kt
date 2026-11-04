@@ -33,6 +33,7 @@ class ManualHotspotManager(
     channel: Int,
     security: ManualHotspotSecurity,
     private val onDiagnostic: (String) -> Unit = {},
+    private val rootProbe: HotspotRootProbe = HotspotRootProbe(),
 ) : WirelessHotspotManager {
     private val appContext = context.applicationContext
     private val wifiManager = appContext.getSystemService(WifiManager::class.java)
@@ -95,27 +96,126 @@ class ManualHotspotManager(
             }.getOrNull(),
         )
         val connectionFrequency = frequencyFromConnectionInfo()
-        val scanFrequency = frequencyFromScanResult(localInterface)
+        // The scan result matched to the AP interface BSSID is the only direct observation of what
+        // the iPhone will actually see: its broadcast name and its channel.
+        val scan = observeScanResult(localInterface)
+        // MIUI hides SoftApConfiguration from apps, so without a scan the channel and the security
+        // type would be guesses. The device is rooted, so read the live AP from the system.
+        val rootObservation = if (apConfiguration == null) {
+            rootProbe.probe(localInterface.name)?.also { probe ->
+                onDiagnostic(
+                    "Manual hotspot root probe channel=${probe.channel ?: "unknown"} " +
+                        "frequency=${probe.frequencyMHz?.toString() ?: "unknown"}MHz " +
+                        "ap-mode=${probe.apMode ?: "unknown"} " +
+                        "securityType=${probe.securityType ?: "unknown"}",
+                )
+            }
+        } else {
+            null
+        }
+        val scanFrequency = scan.frequencyMHz ?: rootObservation?.frequencyMHz
         val channel = observedManualHotspotChannel(
-            apChannel = apConfiguration?.channel ?: 0,
+            apChannel = apConfiguration?.channel ?: rootObservation?.channel ?: 0,
             connectionFrequencyMHz = connectionFrequency,
             scanFrequencyMHz = scanFrequency,
             apFrequencyMHz = apConfiguration?.frequencyMHz,
         )
+        val channelSource = when {
+            apConfiguration != null && apConfiguration.channel > 0 -> "config"
+            scan.frequencyMHz != null -> "scan"
+            rootObservation?.channel != null -> "root"
+            connectionFrequency != null -> "sta"
+            else -> "none"
+        }
         val frequencyMHz = when {
             apConfiguration?.frequencyMHz != null -> apConfiguration.frequencyMHz
+            rootObservation?.frequencyMHz != null -> rootObservation.frequencyMHz
             connectionFrequency != null -> connectionFrequency
-            scanFrequency != null -> scanFrequency
+            scan.frequencyMHz != null -> scan.frequencyMHz
             else -> null
         }
-        val security = apConfiguration?.security ?: expectedSecurity
+        val broadcastSsid = preferredBroadcastSsid(expectedSsid, scan.ssid)
+        val nameCheck = broadcastNameCheck(expectedSsid, scan.ssid)
+        val rootSecurity = rootObservation?.securityType?.let(::mapSoftApSecurity)
+        val security = apConfiguration?.security ?: rootSecurity ?: expectedSecurity
+        val securitySource = when {
+            apConfiguration?.security != null -> "config"
+            rootSecurity != null -> "root"
+            else -> "saved settings"
+        }
+        // The AP's own passphrase is authoritative. A saved setting that has drifted from the
+        // phone's hotspot password makes iOS fail the join silently (and remember the bad
+        // password for that SSID), while a manual join with the right password still works.
+        val livePassphrase = usableLivePassphrase(apConfiguration, security)
+        val publishedPassphrase = when {
+            security == Iap2WirelessSecurity.NONE -> ""
+            livePassphrase != null -> livePassphrase
+            else -> passphrase
+        }
+        val passphraseSource = if (security != Iap2WirelessSecurity.NONE && livePassphrase != null) {
+            HotspotPassphraseSource.LIVE_AP
+        } else {
+            HotspotPassphraseSource.SAVED_SETTINGS
+        }
+        val hiddenSsid = apConfiguration?.hiddenSsid == true
+        // Keys avoid "ssid"/"passphrase": the diagnostic export drops any line mentioning them.
         onDiagnostic("Manual hotspot configReadable=${apConfiguration != null} " +
-            "security=$security channelKnown=${channel > 0} " +
+            "security=$security security-source=$securitySource " +
+            "channelKnown=${channel > 0} channel-source=$channelSource " +
+            "key-source=${passphraseSource.label} hidden=$hiddenSsid " +
+            "name-check=${nameCheck.label} " +
             "hardwareAddressKnown=${localInterface.hardwareAddress != null} iface=${localInterface.name} " +
             "family=${if (localInterface.hostAddress is Inet6Address) "IPv6" else "IPv4"}")
-        if (security != Iap2WirelessSecurity.NONE && passphrase.isEmpty()) {
+        if (security != Iap2WirelessSecurity.NONE && publishedPassphrase.isEmpty()) {
             throw IOException("Manual hotspot is secured but no passphrase was provided")
         }
+        broadcastSsidNotice(expectedSsid, scan.ssid)?.let(onDiagnostic)
+        if (passphraseSource == HotspotPassphraseSource.SAVED_SETTINGS &&
+            security != Iap2WirelessSecurity.NONE
+        ) {
+            onDiagnostic(
+                "Manual hotspot key is not readable from Android; sending the saved setting. " +
+                    "It must match the phone hotspot key exactly or the iPhone will not join " +
+                    "automatically",
+            )
+        }
+        if (livePassphrase != null && livePassphrase != passphrase) {
+            onDiagnostic(
+                "Saved hotspot key differs from the live AP key; sending the live one",
+            )
+        }
+        if (hiddenSsid) {
+            onDiagnostic(
+                "Manual hotspot hides its name; iOS never auto-joins a hidden network. " +
+                    "Unhide the hotspot for Bluetooth-initiated CarPlay",
+            )
+        }
+        if (security == Iap2WirelessSecurity.WPA3_ONLY) {
+            onDiagnostic(
+                "Manual hotspot is WPA3-only; iOS may refuse an accessory-provided WPA3 network. " +
+                    "Use WPA2 or WPA3 transition for Bluetooth-initiated CarPlay",
+            )
+        }
+        // One actionable line for the UI; the details stay in the debug log above.
+        val notice = listOfNotNull(
+            broadcastSsidNotice(expectedSsid, scan.ssid),
+            if (channel == 0) {
+                "Hotspot channel is unknown to Android, so the iPhone gets 0 (auto)"
+            } else {
+                null
+            },
+            "Hotspot interface is not in AP mode; turn the hotspot on"
+                .takeIf { rootObservation?.apMode == false },
+            "Hidden hotspot: the iPhone will not join it automatically; unhide the hotspot"
+                .takeIf { hiddenSsid },
+            "Hotspot password is not readable by Android; it must match the phone exactly"
+                .takeIf {
+                    security != Iap2WirelessSecurity.NONE &&
+                        passphraseSource == HotspotPassphraseSource.SAVED_SETTINGS
+                },
+            "Hotspot is WPA3-only; iOS may refuse it. Use WPA2 or WPA3 transition"
+                .takeIf { security == Iap2WirelessSecurity.WPA3_ONLY },
+        ).firstOrNull()
 
         if (channel == 0) {
             Log.w(
@@ -127,8 +227,8 @@ class ManualHotspotManager(
         }
         val observedBandLabel = wifiBandLabel(apConfiguration?.band)
         return WirelessHotspotInfo(
-            ssid = expectedSsid,
-            passphrase = passphrase,
+            ssid = broadcastSsid,
+            passphrase = publishedPassphrase,
             security = security,
             channel = channel,
             frequencyMHz = frequencyMHz,
@@ -142,7 +242,29 @@ class ManualHotspotManager(
                     frequencyMHz?.let(::bandLabel) ?: observedBandLabel ?: "Auto"
             },
             backend = WirelessHotspotBackend.MANUAL_HOTSPOT,
+            passphraseSource = passphraseSource,
+            hiddenSsid = hiddenSsid,
+            notice = notice,
+            nameCheck = nameCheck,
+            apMode = rootObservation?.apMode,
         )
+    }
+
+    /**
+     * The live AP passphrase, or null when Android does not expose a usable one. OEM builds may
+     * redact it (null, empty or asterisks) for third-party callers, in which case the saved
+     * setting stays authoritative.
+     */
+    private fun usableLivePassphrase(
+        configuration: ManualApConfiguration?,
+        security: Iap2WirelessSecurity,
+    ): String? {
+        if (security == Iap2WirelessSecurity.NONE) return null
+        val candidate = configuration?.passphrase ?: return null
+        if (candidate.length !in 8..63) return null
+        if ('\u0000' in candidate) return null
+        if (candidate.all { it == '*' }) return null
+        return candidate
     }
 
     override fun close() {
@@ -225,18 +347,25 @@ class ManualHotspotManager(
         return connectionInfo.frequency.takeIf { it > 0 }
     }
 
-    private fun frequencyFromScanResult(localInterface: LocalHotspotInterface): Int? {
-        val localBssid = localInterface.hardwareAddress ?: return null
+    /**
+     * What the AP looks like over the air, matched by the AP interface's BSSID. Without precise
+     * location Android does not hand out scan results, and a hidden SSID never appears at all, so
+     * a miss simply means "unobservable" rather than "wrong".
+     */
+    private fun observeScanResult(localInterface: LocalHotspotInterface): ScanObservation {
+        val localBssid = localInterface.hardwareAddress ?: return ScanObservation(null, null)
         val scanResults = try {
             wifiManager.scanResults
         } catch (_: SecurityException) {
-            return null
+            return ScanObservation(null, null)
         }
-        return scanResults.firstOrNull { result ->
-            result.SSID == expectedSsid &&
-                result.BSSID.equals(localBssid, ignoreCase = true) &&
-                result.frequency > 0
-        }?.frequency
+        val match = scanResults.firstOrNull { result ->
+            result.BSSID.equals(localBssid, ignoreCase = true)
+        } ?: return ScanObservation(null, null)
+        return ScanObservation(
+            ssid = match.SSID?.takeIf { it.isNotBlank() },
+            frequencyMHz = match.frequency.takeIf { it > 0 },
+        )
     }
 
     @SuppressLint("PrivateApi")
@@ -276,6 +405,8 @@ class ManualHotspotManager(
                 channel = channel,
                 frequencyMHz = wifiChannelToFrequencyMhz(channel, band),
                 security = mapSoftApSecurity(configuration.securityType),
+                passphrase = runCatching { configuration.passphrase }.getOrNull(),
+                hiddenSsid = runCatching { configuration.isHiddenSsid }.getOrNull(),
             )
         } catch (_: Throwable) {
             null
@@ -305,6 +436,12 @@ class ManualHotspotManager(
                 channel = channel,
                 frequencyMHz = wifiChannelToFrequencyMhz(channel, band),
                 security = mapWifiConfigurationSecurity(configuration),
+                passphrase = configuration.preSharedKey?.let(::unquote),
+                hiddenSsid = runCatching {
+                    WifiConfiguration::class.java
+                        .getField("hiddenSSID")
+                        .getBoolean(configuration)
+                }.getOrNull(),
             )
         } catch (_: Throwable) {
             null
@@ -370,6 +507,15 @@ class ManualHotspotManager(
         val channel: Int,
         val frequencyMHz: Int?,
         val security: Iap2WirelessSecurity,
+        /** Live passphrase when Android exposes it to this app. */
+        val passphrase: String? = null,
+        /** Null when the platform does not report it. */
+        val hiddenSsid: Boolean? = null,
+    )
+
+    private class ScanObservation(
+        val ssid: String?,
+        val frequencyMHz: Int?,
     )
 
     private class LocalHotspotInterface(

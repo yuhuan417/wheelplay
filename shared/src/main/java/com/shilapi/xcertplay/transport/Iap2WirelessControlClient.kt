@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.diagnostics.WirelessHandoffRecord
 import com.shilapi.xcertplay.iap2.message.Iap2CarPlayMessages
 import com.shilapi.xcertplay.iap2.message.Iap2ControlMessages
 import com.shilapi.xcertplay.iap2.message.Iap2WirelessMessages
@@ -65,6 +66,19 @@ class Iap2WirelessControlClient(
         var postTransportWiFiConfigurationsSent = 0
         var transportNotificationSeen = false
         var wirelessCarPlayAvailableSeen = false
+        var wirelessAvailabilityReported: Boolean? = null
+        var wifiConfigurationRequests = 0
+        var proactiveWifiConfigurationSent = false
+        // Give the phone a moment to ask for the credentials in the normal order before pushing
+        // them unsolicited; a phone that never asks (0x5702 absent) has nothing to join with.
+        val proactiveWifiEligibleAtNanos = System.nanoTime() +
+            PROACTIVE_WIFI_CONFIGURATION_GRACE_MILLIS * NANOS_PER_MILLISECOND
+        // No "ssid"/"passphrase" tokens: the diagnostic export drops lines mentioning them.
+        val hints = "name-length=${endpoint.ssid.length} key-length=${endpoint.passphrase.length} " +
+            "channel=${endpoint.channel} security=${endpoint.security.name} " +
+            "ip=${endpoint.ipAddresses.joinToString(",")}"
+        WirelessHandoffRecord.put("iap2-config-channel", endpoint.channel)
+        WirelessHandoffRecord.put("iap2-config-security", endpoint.security.name)
         while (true) {
                 val remaining = remainingMillis(deadlineNanos)
                 if (remaining == 0L) {
@@ -77,9 +91,36 @@ class Iap2WirelessControlClient(
                         transportNotificationSeen,
                         postTransportWiFiConfigurationsSent,
                         wirelessCarPlayAvailableSeen,
+                        wirelessAvailabilityReported,
+                        wifiConfigurationRequests,
                     )
                 }
-                val incoming = session.recv(remaining)
+                // A phone that never asked for the credentials has nothing to join with, so push
+                // them once after a grace period. Checked before receiving so a chatty session
+                // cannot postpone it past the deadline.
+                if (
+                    !proactiveWifiConfigurationSent && wifiConfigurationRequests == 0 &&
+                    System.nanoTime() >= proactiveWifiEligibleAtNanos
+                ) {
+                    send(accessoryWiFiConfiguration(endpoint), deadlineNanos)
+                    proactiveWifiConfigurationSent = true
+                    preTransportWiFiConfigurationsSent++
+                    wifiConfigurationsSent++
+                    WirelessHandoffRecord.put("iap2-config-sent", wifiConfigurationsSent)
+                    WirelessHandoffRecord.put("iap2-config-pushed", "yes")
+                    stage = later(stage, Iap2WirelessControlStage.WIFI_CONFIG_SENT)
+                    onProgress(
+                        "iap2 tx=0x5703 proactive accessory-wifi-configuration " +
+                            "(the phone sent no 0x5702 within " +
+                            "$PROACTIVE_WIFI_CONFIGURATION_GRACE_MILLIS ms) $hints",
+                    )
+                }
+                val wait = if (!proactiveWifiConfigurationSent && wifiConfigurationRequests == 0) {
+                    min(remaining, PROACTIVE_WIFI_CONFIGURATION_POLL_MILLIS)
+                } else {
+                    remaining
+                }
+                val incoming = session.recv(wait)
                 if (incoming == null) {
                     if (session.isClosed) {
                         return Iap2WirelessControlResult(
@@ -91,6 +132,8 @@ class Iap2WirelessControlClient(
                             transportNotificationSeen,
                             postTransportWiFiConfigurationsSent,
                             wirelessCarPlayAvailableSeen,
+                            wirelessAvailabilityReported,
+                            wifiConfigurationRequests,
                         )
                     }
                     if (remainingMillis(deadlineNanos) == 0L) {
@@ -103,6 +146,8 @@ class Iap2WirelessControlClient(
                             transportNotificationSeen,
                             postTransportWiFiConfigurationsSent,
                             wirelessCarPlayAvailableSeen,
+                            wirelessAvailabilityReported,
+                            wifiConfigurationRequests,
                         )
                     }
                     continue
@@ -110,7 +155,13 @@ class Iap2WirelessControlClient(
 
                 when (incoming.messageId) {
                     REQUEST_ACCESSORY_WIFI_CONFIGURATION -> {
-                        onProgress("iap2 rx=0x5702 request-wifi-configuration")
+                        wifiConfigurationRequests++
+                        proactiveWifiConfigurationSent = true
+                        WirelessHandoffRecord.put("iap2-credentials-requests", wifiConfigurationRequests)
+                        onProgress(
+                            "iap2 rx=0x5702 request-wifi-configuration " +
+                                "request=${wifiConfigurationRequests}",
+                        )
                         val postTransport = transportNotificationSeen
                         val sentCount = if (postTransport) {
                             postTransportWiFiConfigurationsSent
@@ -137,28 +188,75 @@ class Iap2WirelessControlClient(
                                 },
                             )
                             wifiConfigurationsSent++
+                            WirelessHandoffRecord.put("iap2-config-sent", wifiConfigurationsSent)
                             if (postTransport) {
                                 postTransportWiFiConfigurationsSent++
                             } else {
                                 preTransportWiFiConfigurationsSent++
                             }
-                            onProgress("iap2 tx=0x5703 accessory-wifi-configuration")
+                            onProgress("iap2 tx=0x5703 accessory-wifi-configuration $hints")
                         }
                     }
 
                     CARPLAY_AVAILABILITY -> {
-                        onProgress("iap2 rx=0x4300 carplay-availability")
+                        val availability = runCatching {
+                            Iap2WirelessMessages.carPlayAvailability(incoming)
+                        }.onFailure {
+                            onProgress("iap2 rx=0x4300 carplay-availability unreadable: ${it.message}")
+                        }.getOrNull()
+                        if (availability == null) {
+                            onProgress("iap2 rx=0x4300 carplay-availability")
+                        } else {
+                            wirelessAvailabilityReported = availability.wirelessAvailable
+                            WirelessHandoffRecord.put(
+                                "iap2-wireless-available",
+                                availability.wirelessAvailable,
+                            )
+                            WirelessHandoffRecord.put(
+                                "iap2-wired-available",
+                                availability.wiredAvailable,
+                            )
+                            WirelessHandoffRecord.put(
+                                "iap2-bluetooth-id-seen",
+                                availability.bluetoothIdentifier != null,
+                            )
+                            onProgress(
+                                "iap2 rx=0x4300 carplay-availability " +
+                                    "wired=${availability.wiredAvailable} " +
+                                    "wireless=${availability.wirelessAvailable} " +
+                                    "bluetoothIdentifier=${availability.bluetoothIdentifier ?: "none"}",
+                            )
+                            if (availability.wirelessRejected) {
+                                // iOS only joins the accessory hotspot for a wireless CarPlay
+                                // session it has been allowed to start.
+                                onProgress(
+                                    "iap2 warning: the iPhone reports wireless CarPlay " +
+                                        "unavailable; it will not join ${hints}; check " +
+                                        "iPhone Settings > General > CarPlay (and the " +
+                                        "\"Enable Wireless CarPlay\" prompt) for this accessory",
+                                )
+                            }
+                        }
+                        if (wifiConfigurationRequests == 0) {
+                            onProgress(
+                                "iap2 warning: the iPhone never requested the Wi-Fi " +
+                                    "configuration (0x5702) before CarPlayAvailability; iOS " +
+                                    "decides on its own whether to join $hints",
+                            )
+                        }
                         beforeStartSession()
                         send(carPlayStartSession(endpoint), deadlineNanos)
                         onStartSessionSent(System.nanoTime())
                         stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
                         carPlayStartSessionsSent++
-                        onProgress("iap2 tx=0x4301 carplay-start-session")
+                        WirelessHandoffRecord.put("iap2-start-sessions", carPlayStartSessionsSent)
+                        onProgress("iap2 tx=0x4301 carplay-start-session $hints")
                     }
 
                     WIRELESS_CARPLAY_UPDATE -> {
                         val available = Iap2WirelessMessages.wirelessCarPlayAvailability(incoming)
                         if (available) wirelessCarPlayAvailableSeen = true
+                        WirelessHandoffRecord.put("iap2-wireless-update", available)
                         onProgress("iap2 rx=0x4e0d wireless-carplay-update available=$available")
                     }
 
@@ -187,9 +285,10 @@ class Iap2WirelessControlClient(
                                 Iap2WirelessControlStage.POST_TRANSPORT_WIFI_CONFIG_SENT,
                             )
                             wifiConfigurationsSent++
+                            WirelessHandoffRecord.put("iap2-config-sent", wifiConfigurationsSent)
                             postTransportWiFiConfigurationsSent++
                             onProgress(
-                                "iap2 tx=0x5703 post-transport accessory-wifi-configuration",
+                                "iap2 tx=0x5703 post-transport accessory-wifi-configuration $hints",
                             )
                         }
                     }
@@ -219,16 +318,19 @@ class Iap2WirelessControlClient(
         private const val MAX_TIMEOUT_MILLIS = 24 * 60 * 60 * 1_000L
         private const val MAX_RECV_TIMEOUT_MILLIS = 5 * 60 * 1_000L
         private const val MAX_PRE_TRANSPORT_WIFI_CONFIGURATION_SENDS = 5
+        private const val PROACTIVE_WIFI_CONFIGURATION_GRACE_MILLIS = 3_000L
+        private const val PROACTIVE_WIFI_CONFIGURATION_POLL_MILLIS = 1_000L
         private const val MAX_POST_TRANSPORT_WIFI_CONFIGURATION_SENDS = 2
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
-        /** Reference-compatible 0x5703 body. BSSID is omitted when the platform does not expose it. */
+        /** Reference-compatible 0x5703 body, including the AP BSSID when it is known. */
         fun accessoryWiFiConfiguration(endpoint: Iap2WirelessCarPlayEndpoint): Iap2Frame =
             Iap2WirelessMessages.accessoryWiFiConfiguration(
                 ssid = endpoint.ssid,
                 passphrase = endpoint.passphrase,
                 channel = endpoint.channel,
                 securityType = endpoint.security.wireValue,
+                bssid = endpoint.accessPointBssid,
             )
 
         /** Wireless 0x4301 reply carrying the receiver address, port and pairing identity. */
@@ -293,8 +395,17 @@ class Iap2WirelessCarPlayEndpoint(
     val deviceIdentifier: String,
     val publicKey: String,
     val sourceVersion: String,
+    /** The AP's own BSSID, sent as 0x5703 parameter 0; iOS can then join that BSS directly. */
+    accessPointBssid: ByteArray? = null,
 ) {
     val ipAddresses: List<String> = ipAddresses.toList()
+    val accessPointBssid: ByteArray? = accessPointBssid?.copyOf()
+
+    init {
+        require(accessPointBssid == null || accessPointBssid.size == 6) {
+            "accessPointBssid must contain six bytes"
+        }
+    }
 
     init {
         require(ssid.isNotBlank()) { "ssid is required and must not be blank" }
@@ -340,4 +451,11 @@ data class Iap2WirelessControlResult(
     val transportNotificationSeen: Boolean,
     val postTransportWiFiConfigurationsSent: Int,
     val wirelessCarPlayAvailableSeen: Boolean,
+    /**
+     * `wirelessAvailable` reported in the phone's 0x4300, or null when it never sent one.
+     * `false` means the phone did not offer wireless CarPlay for this session.
+     */
+    val wirelessAvailabilityReported: Boolean? = null,
+    /** How many times the phone asked for the accessory Wi-Fi configuration (0x5702). */
+    val wifiConfigurationRequests: Int = 0,
 )

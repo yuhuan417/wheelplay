@@ -134,6 +134,20 @@ object Iap2WirelessMessages {
         }
     }
 
+    fun carPlayAvailability(frame: Iap2Frame): Iap2CarPlayAvailability {
+        require(frame.messageId == Iap2Endpoints.CARPLAY_AVAILABILITY.id) {
+            "Expected CarPlayAvailability, got 0x${frame.messageId.toString(16)}"
+        }
+        val body = Iap2Messages.reader(frame)
+        val wired = groupOrNull(body, 0)
+        val wireless = groupOrNull(body, 1)
+        return Iap2CarPlayAvailability(
+            wiredAvailable = wired?.optionalBool(0),
+            wirelessAvailable = wireless?.optionalBool(0),
+            bluetoothIdentifier = wireless?.optionalString(1),
+        )
+    }
+
     fun deviceTransportIdentifier(frame: Iap2Frame): Iap2DeviceTransportIdentifier {
         require(frame.messageId == Iap2Endpoints.DEVICE_TRANSPORT_IDENTIFIER.id) {
             "Expected DeviceTransportIdentifierNotification, got 0x${frame.messageId.toString(16)}"
@@ -144,6 +158,9 @@ object Iap2WirelessMessages {
             usbTransportIdentifier = body.optionalString(1),
         )
     }
+
+    private fun groupOrNull(body: Iap2BodyReader, id: Int): Iap2BodyReader? =
+        body.optionalRaw(id)?.let { Iap2BodyReader.of(Iap2ParameterList.parse(it)) }
 }
 
 /** Typed accessory-authentication bodies, including the BAA certificate package layout. */
@@ -200,6 +217,22 @@ data class Iap2DeviceTransportIdentifier(
     val bluetoothMac: String?,
     val usbTransportIdentifier: String?,
 )
+
+/**
+ * The transports the phone offers before the accessory answers with 0x4301.
+ *
+ * A wireless StartSession is only meaningful when the phone reports wireless CarPlay as
+ * available; `wirelessAvailable = 0` means iOS will not join the accessory hotspot for this
+ * session (for example when wireless CarPlay was never allowed for this accessory, or when the
+ * phone is already acting as a personal hotspot).
+ */
+data class Iap2CarPlayAvailability(
+    val wiredAvailable: Boolean?,
+    val wirelessAvailable: Boolean?,
+    val bluetoothIdentifier: String?,
+) {
+    val wirelessRejected: Boolean get() = wirelessAvailable == false
+}
 
 /** Typed codecs for subscription requests used during bring-up. */
 object Iap2ControlMessages {

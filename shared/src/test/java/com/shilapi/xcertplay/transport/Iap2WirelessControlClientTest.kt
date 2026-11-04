@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.iap2.message.Iap2Messages
 import com.shilapi.xcertplay.iap2.message.Iap2WirelessMessages
 import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import com.shilapi.xcertplay.iap2.wire.Iap2Parameter
@@ -86,7 +87,81 @@ class Iap2WirelessControlClientTest {
         assertTrue(Iap2WirelessMessages.wirelessCarPlayAvailability(frame))
     }
 
-    private fun endpoint(): Iap2WirelessCarPlayEndpoint = Iap2WirelessCarPlayEndpoint(
+    @Test
+    fun carPlayAvailabilityReadsTheWirelessTransportFlag() {
+        val frame = Iap2Messages.buildRaw(0x4300) {
+            group(1) {
+                u8(0, 0)
+                string(1, "AA:BB:CC:DD:EE:FF")
+            }
+        }
+
+        val availability = Iap2WirelessMessages.carPlayAvailability(frame)
+
+        assertEquals(false, availability.wirelessAvailable)
+        assertTrue(availability.wirelessRejected)
+        assertEquals("AA:BB:CC:DD:EE:FF", availability.bluetoothIdentifier)
+        assertNull(availability.wiredAvailable)
+    }
+
+    @Test
+    fun carPlayAvailabilityWithoutAWirelessGroupIsNotAWirelessRejection() {
+        val availability = Iap2WirelessMessages.carPlayAvailability(
+            Iap2Messages.buildRaw(0x4300) { group(0) { u8(0, 1) } },
+        )
+
+        assertEquals(true, availability.wiredAvailable)
+        assertNull(availability.wirelessAvailable)
+        assertFalse(availability.wirelessRejected)
+    }
+
+    @Test
+    fun accessoryWiFiConfigurationCarriesTheAccessPointBssid() {
+        val bssid = byteArrayOf(0x7a, 0x11, 0x67, 0x87.toByte(), 0x16, 0x5d)
+        val frame = Iap2WirelessControlClient.accessoryWiFiConfiguration(endpoint(bssid = bssid))
+        val parameters = parameters(frame.payload)
+
+        assertArrayEquals(bssid, parameters.single { it.id == 0 }.payload)
+        assertEquals("LIVI\u0000", parameters.single { it.id == 1 }.payload.decodeToString())
+    }
+
+    @Test
+    fun theTraceNeverPrintsTheWifiPassphrase() {
+        val frame = Iap2WirelessControlClient.accessoryWiFiConfiguration(endpoint())
+
+        val trace = com.shilapi.xcertplay.iap2.trace.Iap2FrameFormatter.format(
+            com.shilapi.xcertplay.iap2.trace.Iap2TraceDirection.TX,
+            "test",
+            frame,
+        )
+
+        assertFalse("secret123" in trace)
+        assertTrue("<redacted>" in trace)
+    }
+
+    @Test
+    fun theEndpointRejectsABssidThatIsNotSixBytes() {
+        var rejected = false
+        try {
+            endpoint(bssid = byteArrayOf(1, 2, 3))
+        } catch (_: IllegalArgumentException) {
+            rejected = true
+        }
+
+        assertTrue(rejected)
+    }
+
+    @Test
+    fun theEndpointCopiesTheBssid() {
+        val bssid = byteArrayOf(0x7a, 0x11, 0x67, 0x87.toByte(), 0x16, 0x5d)
+        val endpoint = endpoint(bssid = bssid)
+
+        bssid[0] = 0
+
+        assertEquals(0x7a, endpoint.accessPointBssid!![0].toInt() and 0xff)
+    }
+
+    private fun endpoint(bssid: ByteArray? = null): Iap2WirelessCarPlayEndpoint = Iap2WirelessCarPlayEndpoint(
         ssid = "LIVI",
         passphrase = "secret123",
         channel = 36,
@@ -96,6 +171,7 @@ class Iap2WirelessControlClientTest {
         deviceIdentifier = "dev-1",
         publicKey = "aabbcc",
         sourceVersion = "1.0",
+        accessPointBssid = bssid,
     )
 
     private fun u16Values(bytes: ByteArray): List<Int> =

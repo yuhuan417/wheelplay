@@ -160,6 +160,9 @@ class CarPlayHostActivity : ComponentActivity() {
     private var resolutionValueView: TextView? = null
     private var resolutionPreviewView: TextView? = null
     private var hotspotStatusView: TextView? = null
+
+    /** Sticky hint: the iPhone serves its hotspot, so it will not join until it is turned off. */
+    @Volatile private var iphoneHotspotBlocked = false
     private var manualHotspotFields: View? = null
     private var manualHotspotErrorView: TextView? = null
     private var safeAreaSummaryView: TextView? = null
@@ -292,7 +295,22 @@ class CarPlayHostActivity : ComponentActivity() {
         loadPersistedSettings()
         locationPermissionAvailable = hasFineLocationPermission()
         setContentView(buildContentView().also(ServerWindow::fitContent))
-        activeDisplaySize = DisplaySize(1280, 720)
+        // CarPlay is usually started from the car browser page, which reports its viewport long
+        // before the button is pressed. Negotiate that size from the first handshake instead of
+        // starting at 1280x720 and restarting as soon as the viewport is applied. When no browser
+        // is open yet, reuse the size of the last successful session so the same car unit is
+        // reproduced without a restart when its page shows up with the same viewport.
+        val knownViewport = knownBrowserDisplaySize()
+        val rememberedSize = if (knownViewport == null) rememberedDisplaySize() else null
+        activeDisplaySize = knownViewport ?: rememberedSize ?: DisplaySize(1280, 720)
+        when {
+            knownViewport != null -> appendLog(
+                "Browser viewport known before connect: ${knownViewport.width}x${knownViewport.height}",
+            )
+            rememberedSize != null -> appendLog(
+                "Reusing last display size: ${rememberedSize.width}x${rememberedSize.height}",
+            )
+        }
         WebSession.setBrowserViewportListener { width, height ->
             mainHandler.post { scheduleBrowserDisplaySize(width, height) }
         }
@@ -1562,6 +1580,21 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(10) },
         )
 
+        manualFields.addView(
+            menuText(
+                "When Android exposes the live hotspot password, WheelPlay sends that one. " +
+                    "Otherwise it sends the value above, and it must match the phone hotspot " +
+                    "exactly: iOS fails the automatic join silently and keeps the wrong password " +
+                    "for that SSID until you re-enter it on the iPhone.",
+                14f,
+                MENU_SECONDARY,
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(4) },
+        )
+
         val error = menuText("", 14f, Color.rgb(0xff, 0x7a, 0x7a)).apply {
             visibility = View.GONE
         }
@@ -1632,15 +1665,18 @@ class CarPlayHostActivity : ComponentActivity() {
                 band = status.band,
                 channel = status.channel,
                 backend = status.backend,
+                notice = status.notice,
             )
             CarPlayStatus.WaitingForPairedIphone ->
                 hotspotStatus.copy(state = "Waiting for paired iPhone")
+            CarPlayStatus.IphoneHotspotUplink -> {
+                iphoneHotspotBlocked = true
+                hotspotStatus.copy(state = "iPhone hotspot blocks joining")
+            }
             CarPlayStatus.ConnectingBluetooth ->
                 hotspotStatus.copy(state = "Connecting Bluetooth")
-            CarPlayStatus.RunningWireless ->
-                hotspotStatus.copy(state = "Running")
-            CarPlayStatus.WirelessActive ->
-                hotspotStatus.copy(state = "Active")
+            CarPlayStatus.RunningWireless -> hotspotStatus.copy(state = "Running")
+            CarPlayStatus.WirelessActive -> hotspotStatus.copy(state = "Active")
             CarPlayStatus.WirelessActiveFallback ->
                 hotspotStatus.copy(state = "Active (Bluetooth control)")
             CarPlayStatus.AttachingNetwork ->
@@ -1661,6 +1697,7 @@ class CarPlayHostActivity : ComponentActivity() {
             status.channel?.let {
                 append("\nChannel: ").append(if (it == 0) "Auto" else it.toString())
             }
+            status.notice?.let { append('\n').append(it) }
             manualHotspotChannelPermissionNote?.let { append('\n').append(it) }
         }
     }
@@ -2082,6 +2119,11 @@ class CarPlayHostActivity : ComponentActivity() {
                     activeAirPlaySession = session
                     CarPlayBackgroundSession.active = true
                     reconnectAttempts = 0
+                    // Remember the negotiated size for the next session, before any viewport
+                    // change can rebuild the stack at a different one.
+                    activeDisplaySize?.let {
+                        AirPlayPersistence.saveLastDisplaySize(this@CarPlayHostActivity, it.width, it.height)
+                    }
                     syncAirPlayDarkMode()
                     armVideoWatchdog(session, controllerGeneration)
                     if (menuOpen) return@runOnUiThread
@@ -2327,14 +2369,33 @@ class CarPlayHostActivity : ComponentActivity() {
         mainHandler.postDelayed(applyDisplaySize, DISPLAY_CHANGE_DEBOUNCE_MILLIS)
     }
 
+    private fun displaySizeForViewport(width: Int, height: Int): DisplaySize {
+        val scale = minOf(1.0, 3840.0 / width, 2160.0 / height)
+        fun even(value: Double) = (value.toInt().coerceAtLeast(2) / 2) * 2
+        return DisplaySize(even(width * scale), even(height * scale))
+    }
+
+    /** The browser viewport the next handshake should use, or null when it is not known or unused. */
+    private fun knownBrowserDisplaySize(): DisplaySize? {
+        if (!WebSession.adaptiveBrowserSize) return null
+        val viewport = WebSession.currentBrowserViewport ?: return null
+        if (viewport.first <= 0 || viewport.second <= 0) return null
+        return displaySizeForViewport(viewport.first, viewport.second)
+    }
+
+    /** The last size that completed a handshake, used until a browser reports its viewport. */
+    private fun rememberedDisplaySize(): DisplaySize? {
+        if (!WebSession.adaptiveBrowserSize) return null
+        val (width, height) = AirPlayPersistence.loadLastDisplaySize(this) ?: return null
+        return DisplaySize(width, height)
+    }
+
     private fun scheduleBrowserDisplaySize(width: Int?, height: Int?) {
         if (shuttingDown.get()) return
         val size = if (width == null || height == null) {
             DisplaySize(1280, 720)
         } else {
-            val scale = minOf(1.0, 3840.0 / width, 2160.0 / height)
-            fun even(value: Double) = (value.toInt().coerceAtLeast(2) / 2) * 2
-            DisplaySize(even(width * scale), even(height * scale))
+            displaySizeForViewport(width, height)
         }
         if (size == activeDisplaySize || size == pendingDisplaySize) return
         activeDisplaySize?.let { active ->
@@ -2729,6 +2790,10 @@ class CarPlayHostActivity : ComponentActivity() {
                 activeScreenStreamTypes.remove(type)
             }
             WebSession.videoActive = activeScreenStreamTypes.isNotEmpty()
+            if (WebSession.videoActive && iphoneHotspotBlocked) {
+                iphoneHotspotBlocked = false
+                setConnectionStage(latestStage)
+            }
             updateDebugOverlays()
         }
     }
@@ -2742,7 +2807,13 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun setConnectionStage(message: String) {
         latestStage = message
-        WebSession.stage = friendlyStage(message)
+        // The blocked-by-iPhone-hotspot hint must survive the retry loop, which would otherwise
+        // replace it with "preparing/reconnecting" within a second.
+        WebSession.stage = if (iphoneHotspotBlocked) {
+            CarPlayStatus.IphoneHotspotUplink.describe()
+        } else {
+            friendlyStage(message)
+        }
         stageStatusView?.text = WebSession.stage
         updateDebugOverlays()
     }
@@ -2759,6 +2830,11 @@ class CarPlayHostActivity : ComponentActivity() {
         message.contains("Allow Nearby devices", true) -> "Allow access to nearby devices in the app permissions."
         message.contains("createGroup failed", true) -> "Cannot start CarPlay Wi-Fi. Check Wi-Fi and close other casting apps. Retrying…"
         message.contains("needs a reset", true) -> "The previous Wi-Fi Direct connection is still running. Reset the connection in settings."
+        message.contains("did not join", true) ->
+            "The iPhone did not join this hotspot. Check the hotspot password, that its SSID is " +
+                "visible, and iPhone Settings > General > CarPlay; joining it by hand also works."
+        message.contains("does not match the active local AP configuration", true) ->
+            "The hotspot name in WheelPlay does not match this phone's hotspot. Fix it in Wi-Fi session settings."
         message.contains("socket", true) || message.contains("RFCOMM", true) -> "Cannot connect to the iPhone yet. Unlock it and check Bluetooth."
         message.contains("unsupported", true) || message.contains("not supported", true) -> "This device may not support wireless CarPlay."
         message.contains("denied", true) || message.contains("permission", true) -> "Allow the connection permissions to continue."
@@ -2828,14 +2904,19 @@ class CarPlayHostActivity : ComponentActivity() {
         CarPlayStatus.DiscoveringMfi -> "Preparing MFi authentication"
         CarPlayStatus.MfiReady -> "MFi authentication ready"
         CarPlayStatus.StartingHotspot -> "Starting wireless hotspot"
+        // Shown verbatim on the head unit: friendlyStage keeps messages that contain Chinese.
+        CarPlayStatus.IphoneHotspotUplink ->
+            "iPhone 正在共享个人热点，不会加入车内热点。请先关闭 iPhone 个人热点；" +
+                "CarPlay 连上后可以再打开热点上网。"
         is CarPlayStatus.HotspotReady ->
             "Hotspot ready: $backend, $ssid, $band, " +
                 "channel ${if (channel == 0) "auto" else channel}"
         CarPlayStatus.WaitingForPairedIphone -> "Waiting for paired iPhone"
         CarPlayStatus.ConnectingBluetooth -> "Connecting Bluetooth"
         CarPlayStatus.RunningWireless -> "Wireless CarPlay control running"
-        CarPlayStatus.WirelessActive -> "Wireless CarPlay active"
-        CarPlayStatus.WirelessActiveFallback -> "Wireless CarPlay active with Bluetooth control"
+        // Both of these only mean the iAP2 control channel is up; the iPhone still has to join.
+        CarPlayStatus.WirelessActive -> "蓝牙控制通道已就绪，等待 iPhone 加入热点"
+        CarPlayStatus.WirelessActiveFallback -> "蓝牙控制通道已就绪（回退模式），等待 iPhone 加入热点"
         CarPlayStatus.AttachingNetwork -> "Starting AirPlay service"
         CarPlayStatus.ControlEnded -> "CarPlay control window ended"
         is CarPlayStatus.Failed -> "Failed: ${message}"
@@ -2880,6 +2961,7 @@ class CarPlayHostActivity : ComponentActivity() {
         val band: String? = null,
         val channel: Int? = null,
         val backend: String? = null,
+        val notice: String? = null,
     )
 }
 

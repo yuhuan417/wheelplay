@@ -28,6 +28,7 @@ import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.AirPlayTcpAccepted
 import com.shilapi.xcertplay.airplay.PairingStore
+import com.shilapi.xcertplay.diagnostics.WirelessHandoffRecord
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.LocalMfiAuthenticationClient
@@ -37,6 +38,7 @@ import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.network.HotspotAddressPolicy
 import com.shilapi.xcertplay.network.HotspotAddressRecovery
 import com.shilapi.xcertplay.network.ManualHotspotManager
+import com.shilapi.xcertplay.network.HotspotVendorElement
 import com.shilapi.xcertplay.network.WirelessHotspotInfo
 import com.shilapi.xcertplay.network.WirelessHotspotBackend
 import com.shilapi.xcertplay.network.WirelessHotspotManager
@@ -78,6 +80,9 @@ sealed class CarPlayStatus {
     data object DiscoveringMfi : CarPlayStatus()
     data object MfiReady : CarPlayStatus()
     data object StartingHotspot : CarPlayStatus()
+
+    /** The iPhone is serving its Personal Hotspot, so it will not join the accessory AP. */
+    data object IphoneHotspotUplink : CarPlayStatus()
     data class HotspotReady(
         val ssid: String,
         val band: String,
@@ -85,6 +90,8 @@ sealed class CarPlayStatus {
         val bssid: String,
         val address: String,
         val backend: String,
+        /** Actionable problem with the credentials handed to the iPhone, if any. */
+        val notice: String? = null,
     ) : CarPlayStatus()
     data object WaitingForPairedIphone : CarPlayStatus()
     data object ConnectingBluetooth : CarPlayStatus()
@@ -170,6 +177,9 @@ class CarPlayController(
     private val wirelessHandoffRequested = AtomicBoolean(false)
     private val wirelessTunnelReady = AtomicBoolean(false)
     private val wirelessActiveReported = AtomicBoolean(false)
+    private val vendorElement = HotspotVendorElement()
+
+    /** Non-null while the Wi-Fi station is held down for the iPhone to join. */
     private val wirelessGeneration = AtomicInteger(0)
     private val wirelessConnectionProof = WirelessConnectionProof<AirPlaySession>()
     private val wirelessHandoffFellBack = AtomicBoolean(false)
@@ -333,6 +343,8 @@ class CarPlayController(
     /** Re-runs the wireless bring-up using the already-open MFi session. */
     fun reconnectIphone() = synchronized(lifecycleLock) {
         if (closed) return
+        // A user-visible new session starts a fresh record.
+        WirelessHandoffRecord.reset()
         if (mfiSession == null) {
             startMfi()
         } else {
@@ -471,6 +483,9 @@ class CarPlayController(
     private fun runWireless(generation: Int) {
         try {
             debugLog("wireless bring-up generation=$generation starting")
+            // Deliberately not reset per attempt: automatic retries that fail earlier (no
+            // Bluetooth, no hotspot) must not erase the facts of the attempt that got furthest.
+            WirelessHandoffRecord.put("generation", generation)
             closeWirelessStack()
             if (
                 closed ||
@@ -480,6 +495,8 @@ class CarPlayController(
                 return
             }
 
+            // Kept for the watchdog message: iOS sends nothing back when it declines the join.
+            var publishedSsid: String? = null
             val watchdog = FirstTcpWatchdog(
                 listener = AirPlayListenerIdentity(generation),
                 schedule = { delay, action ->
@@ -489,9 +506,24 @@ class CarPlayController(
                     cancel
                 },
                 onTimeout = {
+                    WirelessHandoffRecord.result("iphone-did-not-join")
+                    debugLog(WirelessHandoffRecord.summaryLine())
+                    if (WirelessHandoffRecord.report().contains("uplink=iphone-hotspot")) {
+                        onStatus(
+                            CarPlayStatus.Failed(
+                                "The iPhone did not join: its Personal Hotspot is this device's " +
+                                    "uplink. Turn the hotspot off (CarPlay joins in seconds), " +
+                                    "then turn it back on for internet",
+                                automaticRetry = true,
+                            ),
+                        )
+                    }
                     recoverWireless(
                         generation,
-                        IOException("No AirPlay TCP after CarPlay StartSession"),
+                        IOException(
+                            "No AirPlay TCP after CarPlay StartSession: the iPhone did not join " +
+                                "'${publishedSsid ?: "the hotspot"}'",
+                        ),
                         true,
                     )
                 },
@@ -499,15 +531,36 @@ class CarPlayController(
             )
             firstTcpWatchdog = watchdog
 
-            // Give the STA/uplink a chance to associate before the iPhone is told to join the
-            // accessory hotspot. A hotspot without internet makes iOS leave it and route media
-            // elsewhere, which looks like "connected but no video".
-            if (WifiUplink.isWifiEnabled(appContext) && !WifiUplink.isReady(appContext)) {
-                debugLog("wireless waiting for the Wi-Fi uplink before Bluetooth bring-up")
-                val ready = WifiUplink.await(appContext, WIRELESS_UPLINK_WAIT_MILLIS) {
+            // Apple's vendor element must be in the beacons before the iPhone is asked to join.
+            // hostapd only publishes it when it builds the interface, so a missing element costs
+            // one Wi-Fi restart here - before any session exists.
+            // While the iPhone serves this device's hotspot it never joins the accessory AP.
+            // Nothing on this side can change that, so the only useful action is telling the user.
+            val iphoneHotspotUplink = runCatching {
+                WifiUplink.isIphonePersonalHotspot(appContext)
+            }.getOrDefault(false)
+
+            // Publish the Apple vendor element for the next time the system builds the AP. The
+            // running AP is never restarted: iOS refuses to join while it serves its own hotspot
+            // anyway, and a restart only drops clients that are already connected.
+            val vendorElementResult = vendorElement.ensure()
+            debugLog("wireless vendor element ${vendorElementResult.name.lowercase()}")
+            WirelessHandoffRecord.put("vendor-element", vendorElementResult.name.lowercase())
+
+            // Give the STA a chance to associate after the rebuild before the iPhone is told to
+            // join the accessory hotspot. The AP channel follows the STA channel on single-radio
+            // devices, so joining through an AP that is about to be retuned looks like "connected
+            // but no video". Internet reachability is not required: the car's ConnMan probe is
+            // answered locally.
+            if (
+                WifiUplink.isWifiEnabled(appContext) &&
+                !WifiUplink.isAssociated(appContext)
+            ) {
+                debugLog("wireless waiting for the Wi-Fi STA association before Bluetooth bring-up")
+                val associated = WifiUplink.awaitAssociation(appContext, WIRELESS_UPLINK_WAIT_MILLIS) {
                     closed || generation != wirelessGeneration.get()
                 }
-                debugLog("wireless Wi-Fi uplink ready=$ready")
+                debugLog("wireless Wi-Fi STA associated=$associated")
             }
 
             val mfi = mfiSession?.client
@@ -534,34 +587,6 @@ class CarPlayController(
                 "wireless selected Bluetooth target name=${device.name ?: "unknown"} " +
                     "address=${device.address} localBt=$hostBluetoothMac",
             )
-
-            // Probe and connect Bluetooth RFCOMM first so that when the iPhone is absent,
-            // we never power up the Wi-Fi Direct / hotspot radio, mDNS, AirPlay listener, or WifiLock.
-            onStatus(CarPlayStatus.ConnectingBluetooth)
-            debugLog(
-                "wireless RFCOMM connecting address=${device.address} " +
-                    "uuid=$IAP2_IPHONE_UUID",
-            )
-            var socket = device
-                .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
-                .also { bluetoothSocket = it }
-            connectBluetoothSocket(socket, device.address)
-            debugLog("wireless RFCOMM connected address=${device.address}")
-            if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
-                return
-            }
-            var stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
-            var channel = Iap2Session.openWireless(
-                stream,
-                traceContext = "wireless-rfcomm",
-                onTrace = ::debugLog,
-            ).also { csm = it }
-            debugLog("wireless iAP2 CSM channel opened over RFCOMM")
-            if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
-                return
-            }
 
             acquireWifiLock()
             val hotspotInfo = startWirelessHotspot(generation)
@@ -598,6 +623,7 @@ class CarPlayController(
                 )
             }
             wirelessPublishedAddress = hostAddress
+            publishedSsid = hotspotInfo.ssid
             val hostAddressText = hostAddressText(hostAddress)
             val deviceIdentifier = hotspotInfo.bssid
                 ?.takeUnless { it.equals(ADAPTER_ADDRESS_PLACEHOLDER, ignoreCase = true) }
@@ -611,6 +637,44 @@ class CarPlayController(
                     "band=${hotspotInfo.bandLabel} channel=${hotspotInfo.channel} " +
                     "frequency=${hotspotInfo.frequencyMHz?.toString() ?: "unknown"}MHz",
             )
+            // Everything the iPhone needs to join, in redaction-safe form: the diagnostic export
+            // drops any line that mentions the network name or the key.
+            debugLog(
+                "wireless join facts channel=${hotspotInfo.channel} " +
+                    "security=${hotspotInfo.security.name} band=${hotspotInfo.bandLabel} " +
+                    "hidden=${hotspotInfo.hiddenSsid} name-check=${hotspotInfo.nameCheck.label} " +
+                    "key-source=${hotspotInfo.passphraseSource.label} " +
+                    "key-length=${hotspotInfo.passphrase.length}",
+            )
+            WirelessHandoffRecord.put("hotspot-channel", hotspotInfo.channel)
+            WirelessHandoffRecord.put("hotspot-channel-known", hotspotInfo.channel > 0)
+            WirelessHandoffRecord.put("hotspot-security", hotspotInfo.security.name)
+            WirelessHandoffRecord.put("hotspot-band", hotspotInfo.bandLabel)
+            WirelessHandoffRecord.put("hotspot-hidden", hotspotInfo.hiddenSsid)
+            WirelessHandoffRecord.put("hotspot-name-check", hotspotInfo.nameCheck.label)
+            WirelessHandoffRecord.put("hotspot-ap-mode", hotspotInfo.apMode)
+            WirelessHandoffRecord.put("key-source", hotspotInfo.passphraseSource.label)
+            WirelessHandoffRecord.put("key-length", hotspotInfo.passphrase.length)
+            // An iPhone that is already serving its Personal Hotspot does not join the accessory
+            // AP, which looks exactly like "the Bluetooth handoff did not work". The reverse order
+            // works: once CarPlay is up the hotspot can be enabled and both links coexist, so this
+            // is recorded as a fact and only reported when the join actually times out.
+            if (iphoneHotspotUplink) {
+                WirelessHandoffRecord.put("uplink", "iphone-hotspot")
+            }
+            debugLog("wireless uplink iphone-hotspot=$iphoneHotspotUplink")
+            // iOS never associates with an accessory AP while it is serving its own Personal
+            // Hotspot, so say it up front instead of letting the user watch a two minute timeout.
+            val iphoneHotspotNotice = if (iphoneHotspotUplink && activeSession == null) {
+                "iPhone 正在共享个人热点，不会加入车内热点。" +
+                    "请先关闭 iPhone 个人热点，CarPlay 连上后可以再打开。"
+            } else {
+                null
+            }
+            val hotspotNotice = listOfNotNull(hotspotInfo.notice, iphoneHotspotNotice)
+                .joinToString(" ")
+                .ifBlank { null }
+            hotspotNotice?.let { debugLog("wireless hotspot notice: $it") }
             onStatus(
                 CarPlayStatus.HotspotReady(
                     ssid = hotspotInfo.ssid,
@@ -619,8 +683,12 @@ class CarPlayController(
                     bssid = deviceIdentifier,
                     address = hostAddressText,
                     backend = hotspotInfo.backend.label,
+                    notice = hotspotNotice,
                 ),
             )
+            if (iphoneHotspotUplink && activeSession == null) {
+                onStatus(CarPlayStatus.IphoneHotspotUplink)
+            }
             val wirelessAirPlayConfig = airPlayConfig.copy(
                 deviceId = deviceIdentifier,
                 btMac = hostBluetoothMac,
@@ -677,23 +745,33 @@ class CarPlayController(
                 return
             }
 
-            if (channel.isClosed) {
-                debugLog("wireless RFCOMM closed while hotspot was starting; reconnecting RFCOMM")
-                closeBluetoothBootstrapTransport()
-                socket = device
-                    .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
-                    .also { bluetoothSocket = it }
-                connectBluetoothSocket(socket, device.address)
-                if (isStaleWirelessRun(generation)) {
-                    closeWirelessStack()
-                    return
-                }
-                stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
-                channel = Iap2Session.openWireless(
-                    stream,
-                    traceContext = "wireless-rfcomm",
-                    onTrace = ::debugLog,
-                ).also { csm = it }
+            // Upstream order: the AP, the AirPlay listener and Bonjour are all up before the
+            // iPhone is asked over Bluetooth to join. This keeps the advertisement stable when
+            // iOS evaluates the credentials.
+            onStatus(CarPlayStatus.ConnectingBluetooth)
+            debugLog(
+                "wireless RFCOMM connecting address=${device.address} " +
+                    "uuid=$IAP2_IPHONE_UUID",
+            )
+            val socket = device
+                .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
+                .also { bluetoothSocket = it }
+            connectBluetoothSocket(socket, device.address)
+            debugLog("wireless RFCOMM connected address=${device.address}")
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+            val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
+            val channel = Iap2Session.openWireless(
+                stream,
+                traceContext = "wireless-rfcomm",
+                onTrace = ::debugLog,
+            ).also { csm = it }
+            debugLog("wireless iAP2 CSM channel opened over RFCOMM")
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
             }
             val identification = config.identification.copy(
                 wireless = Iap2WirelessIdentification(hostBluetoothMac, hotspotInfo.ssid),
@@ -708,6 +786,7 @@ class CarPlayController(
                 deviceIdentifier = deviceIdentifier,
                 publicKey = identity.publicKeyHex,
                 sourceVersion = airPlayConfig.sourceVersion,
+                accessPointBssid = accessPointBssidBytes(hotspotInfo.bssid),
             )
             wirelessIdentification = identification
             wirelessAirPlayEndpoint = endpoint
@@ -738,6 +817,10 @@ class CarPlayController(
                 closeWirelessStack()
                 return
             }
+            WirelessHandoffRecord.put("iap2-terminal", result.terminal.name)
+            if (WirelessHandoffRecord.isEmpty().not()) {
+                debugLog(WirelessHandoffRecord.summaryLine())
+            }
             when (result.terminal) {
                 Iap2WirelessControlTerminal.CHANNEL_CLOSED -> {
                     wirelessBootstrapAuthenticated.set(false)
@@ -747,6 +830,8 @@ class CarPlayController(
                     debugLog(
                         "wireless RFCOMM EOF: iap2State=${result.stage} " +
                             "wirelessCarPlayAvailable=${result.wirelessCarPlayAvailableSeen} " +
+                            "wirelessOfferedByPhone=${result.wirelessAvailabilityReported} " +
+                            "wifiConfigRequests=${result.wifiConfigurationRequests} " +
                             "transportIdentifier=${result.transportNotificationSeen} " +
                             "carPlayStartSessions=${result.carPlayStartSessionsSent} " +
                             "postTransportConfigs=${result.postTransportWiFiConfigurationsSent} " +
@@ -815,6 +900,26 @@ class CarPlayController(
     }.getOrElse {
         debugLog("wireless address sampling failed: ${it.javaClass.simpleName}")
         emptyList()
+    }
+
+    /**
+     * The AP's own MAC as iAP2 0x5703 parameter 0. iOS can use it for a directed join, and the
+     * reference implementation always sends it when the platform exposes the address.
+     */
+    private fun accessPointBssidBytes(mac: String?): ByteArray? {
+        val text = mac?.trim().orEmpty()
+        if (text.isEmpty() || text.equals(ADAPTER_ADDRESS_PLACEHOLDER, ignoreCase = true)) return null
+        val parts = text.split(':')
+        if (parts.size != 6) return null
+        val bytes = ByteArray(6)
+        for (index in 0 until 6) {
+            val value = parts[index].toIntOrNull(16) ?: return null
+            bytes[index] = value.toByte()
+        }
+        // All-zero and broadcast addresses are not usable BSSIDs.
+        if (bytes.all { it == 0.toByte() }) return null
+        if (bytes.all { it == 0xff.toByte() }) return null
+        return bytes
     }
 
     private fun recoverWireless(generation: Int, error: Throwable, refreshFamily: Boolean = false) {
@@ -916,7 +1021,12 @@ class CarPlayController(
     ): AirPlaySessionListener =
         object : AirPlaySessionListener by sessionListener {
             override fun onTcpAccepted(event: AirPlayTcpAccepted) {
-                if (!isStaleWirelessRun(generation)) watchdog.accepted(event)
+                if (isStaleWirelessRun(generation)) return
+                if (watchdog.accepted(event)) {
+                    WirelessHandoffRecord.put("airplay-tcp", "accepted")
+                    WirelessHandoffRecord.result("joined")
+                    debugLog(WirelessHandoffRecord.summaryLine())
+                }
             }
 
             override fun onTransportError(message: String) {
@@ -1415,6 +1525,8 @@ class CarPlayController(
             "STEP mfi/ready: MFi authentication provider is ready"
         CarPlayStatus.StartingHotspot ->
             "STEP wifi/ap: starting the wireless CarPlay access point"
+        CarPlayStatus.IphoneHotspotUplink ->
+            "STEP wifi/ap-blocked: the iPhone is serving its Personal Hotspot and will not join"
         is CarPlayStatus.HotspotReady ->
             "STEP wifi/ap-ready: backend=$backend ssid=$ssid band=$band " +
                 "channel=$channel bssid=$bssid address=$address"
@@ -1440,6 +1552,7 @@ class CarPlayController(
         private const val TAG = "xcertplay-usb"
         private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
         private const val WIRELESS_UPLINK_WAIT_MILLIS = 15_000L
+        // Measured on the MIUI/iPhone pair: the phone took ~123 s to leave its hotspot and join.
         private const val BLUETOOTH_ENABLE_WAIT_NANOS = 10_000_000_000L
         private const val BLUETOOTH_ENABLE_POLL_MILLIS = 250L
         private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L

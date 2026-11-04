@@ -945,6 +945,10 @@ class DiPlayActivity : AppCompatActivity() {
                     val ownDomain = com.shilapi.xcertplay.domain.OwnDomainManager.status
                     appendLine("Own domain: phase=${ownDomain.phase}; domain=${ownDomain.domain}; address=${ownDomain.address}; certificateUntil=${ownDomain.certificateUntilMillis}; error=${ownDomain.lastError}")
                     appendLine("Session: ${if (CarPlayBackgroundSession.active) "active" else if (CarPlayBackgroundSession.hasSession()) "connecting" else "stopped"}")
+                    appendLine()
+                    appendLine("--- Wireless join (last attempt) ---")
+                    appendLine(com.shilapi.xcertplay.diagnostics.WirelessHandoffRecord.report())
+                    appendLine()
                     appendLine("Head-unit board: ${Build.BOARD}; hardware: ${Build.HARDWARE}; build: ${Build.DISPLAY}")
                     appendLine()
                     appendLine("--- Last display negotiation (timestamps distinguish it from current settings) ---")

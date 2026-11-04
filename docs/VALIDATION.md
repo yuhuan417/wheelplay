@@ -346,3 +346,115 @@ SHA-256：
 - Android 定位上报与“定位来源”设置。
 
 保留浏览器音频/麦克风链路、WebCodecs、Tesla Root 兼容模式和 ACME/DuckDNS 证书功能。
+
+## 通电电台顺序按信道约束调整（2026-10-29）
+
+小米 8 是单射频设备，STA 与 AP 必须同信道；热点先起、STA 后关联时，框架会把 SoftAP 重调到 STA 信道，踢掉已连设备并使下发给 iPhone 的 `channel` 过期。因此：
+
+- `RootRadioPower.wakeFromStandby()` 分两步：先一次 Root 事务启用 Wi-Fi 和蓝牙，再等 `WifiUplink.isAssociated()`（只判断关联，不要求外网）或最多 10 秒，然后启动系统热点；断电再次触发时中止等待并跳过热点启动。
+- 恢复供电时蓝牙总是重新开启，不再只恢复断电前处于开启状态的蓝牙。
+- `CarPlayController` 在 iAP2 bring-up 前的等待改为按关联判断（最多 15 秒），避免 iPhone 被要求加入即将换信道或没有外网的热点。
+
+验证：`:common:testDebugUnitTest` 202 项、`:shared:testDebugUnitTest` 202 项通过，0 失败 / 跳过；`PowerSaveStandbyTest` 断言 Wi-Fi/蓝牙先启动、热点在其后启动，并覆盖 STA 始终未关联时热点仍会启动。真机上的 MIUI 信道跟随与掉线行为仍待复测。
+
+## 音频链路不受画面与浏览器故障影响（2026-10-29）
+
+数据流分两段：iPhone → 安卓（AirPlay 音频 RTP/UDP、画面 TCP、iAP2 隧道）与安卓 → 浏览器（同一 WebSocket 上的控制、音频、WebCodecs 视频）。iPhone 用下行音频判断链路是否稳定，因此把音频从画面和浏览器侧彻底解耦：
+
+- 画面 TCP 流结束（对端 EOF、复位、读取失败）只关闭这条画面流并上报 `onScreenStreamActive(type, false)`，不再调用 `session.close()`；音频流和 iAP2 控制继续运行，手机重新 SETUP 画面即可恢复。只有 RTSP 控制连接断开、iAP 隧道断开或用户主动断开才结束会话并重连。
+- 音频接收线程（`airplay-audio-rx`）只做解密和 `LinkedBlockingQueue` 非阻塞入队，队列满丢新包；`receive` 连续异常时退避 2 ms，避免空转抢占音频解码的 CPU。浏览器侧拥塞只让发往浏览器的音频按预算丢帧，不反压 AirPlay。
+- WebSocket 写线程顺序固定为控制、音频、视频；浏览器断开只 detach 音频路由并关闭该连接，不触碰 AirPlay 会话。
+
+验证：`:shared:testDebugUnitTest` 203 项、`:common:testDebugUnitTest` 202 项通过，0 失败 / 跳过。新增 `CarPlayMediaEngineTest.screenStreamEndKeepsTheAirPlaySessionAliveForAudio`：绑定画面端口、连接后立即断开，断言 `onSessionEnded` 未被调用、画面被上报为不可用。`shared` 的 JVM 测试新增 `unitTests.returnDefaultValues`，让会话代码里的 `android.util.Log` 不再抛异常。未在真机验证 iOS 在画面中断、仅音频继续时的具体行为（是否自行重开画面流），也未测浏览器卡顿时的实际音频丢弃率，也未验证自适应分辨率触发重启时的音频表现。
+
+## 浏览器发起的连接直接按视口协商分辨率（2026-10-29）
+
+车机页面加载后、点击「连接 iPhone」之前就会通过 WebSocket 上报 `viewport`。原实现在 `CarPlayHostActivity.onCreate` 里先把 `activeDisplaySize` 定为 1280×720，再等视口监听回调（`mainHandler.post` 之后）改尺寸，于是从页面按钮发起的连接会先按 720p 握手、随即因尺寸不同再重建一次。现在 onCreate 直接用 `WebSession.currentBrowserViewport`（开启「自适应浏览器尺寸」时）作为首次协商尺寸，未知时才退回 1280×720；随后监听回调算出的尺寸与 `activeDisplaySize` 相同，不再触发重启，诊断日志会记录 “Browser viewport known before connect: WxH”。
+
+连接后视口若再次变化，仍会重建 CarPlay：分辨率属于 AirPlay 会话协商值（`/info` 能力 + StartSession，触摸 HID 描述符也写死像素尺寸），无法只重启画面流。
+
+验证：`:common:testDebugUnitTest` 202 项通过，0 失败 / 跳过。该 Activity 尺寸选择逻辑没有单测覆盖；真机上应确认诊断日志出现上述记录，且启动阶段不再出现 “Display changed …” 的重启记录。
+
+## 记住上次会话的显示尺寸（2026-10-29）
+
+同一台车机反复投屏时，浏览器未打开的情况下（App 自动连接）原本总是从 1280×720 起步，页面随后上报视口再重建一次。现在每次握手成功（`onSessionActive`）后把当时的 `activeDisplaySize` 存入 `AirPlayPersistence`（`display_last_width/height`），下次启动时依次取：连接前已知的浏览器视口 → 上次成功会话的尺寸 → 1280×720。车机页面稍后上报同一个视口时，算出的尺寸与 `activeDisplaySize` 相等，不再触发重启；换了车机或窗口状态不同才重建一次，成功后记住新尺寸。
+
+存储值带校验（320–8192、偶数、宽高比 0.5–4.0），非法值直接忽略，避免坏值把会话卡在一个无法握手的尺寸。关闭「自适应浏览器尺寸」时不读取该记忆（固定 1280×720），但仍会记录，便于重新开启后使用。
+
+验证：`:common:testDebugUnitTest` 204 项通过，0 失败 / 跳过，新增 `DisplaySizeMemoryTest` 覆盖往返与非法值拒绝。未真机验证：同一车机第二次自动连接时应看到诊断日志 “Reusing last display size: WxH”，且页面打开后不再出现 “Display changed …”。
+
+## 蓝牙引导 iPhone 加入热点（2026-11-03）
+
+现象：iAP2 蓝牙控制通道与 `0x5703` / `0x4301` 都能走完（手动把 iPhone 加入安卓热点后 CarPlay 立刻出画面，说明 AirPlay 端口、公钥、IP 已被接受），但 iPhone 不会自己加入热点。第 3 步（iPhone 加入 M）由 iOS 决定且没有回执，因此本机只能保证"交给 iOS 的提示是对的"。
+
+核对代码后发现四处会让提示与真实热点不一致、或让失败无法解释：
+
+1. **口令一直取自已保存设置。** `ManualHotspotManager` 只校验 SSID / 安全类型，从不读取也不校验热点真实口令；保存值与手机热点不一致时 iOS 静默加入失败，并把这个错口令记到该 SSID 上，手动输入正确口令后立刻恢复。现在优先使用 `SoftApConfiguration.getPassphrase()`（旧路径 `WifiConfiguration.preSharedKey`）读到的实际口令，读不到才回退设置值，并在 `WirelessHotspotInfo.passphraseSource` / 日志 / 热点状态里标出来源。
+2. **隐藏 SSID 没检查。** iOS 不会自动加入隐藏网络。现在读取 `isHiddenSsid` 并在热点状态与日志里提示取消隐藏。
+3. **`0x4300 CarPlayAvailability` 的 `wirelessAvailable` 以前完全没解析。** iPhone 报告无线 CarPlay 不可用（未为这个配件授权无线 CarPlay）时本机仍照发无线 `0x4301`。现在解析并记录 `wired` / `wireless` / `bluetoothIdentifier`，不可用时打印指向 iPhone「设置 → 通用 → CarPlay」的告警，并把结果放进 `Iap2WirelessControlResult.wirelessAvailabilityReported`。
+4. **信道优先用了保存的 SoftApConfiguration 信道。** 小米 8 单射频桥接下框架会把 AP 调到 STA 信道，保存值可能已过期。现在按 扫描到的 AP BSSID 频点 → STA 连接频点 → 配置频点 → 配置信道 取值，全部未知才发 0（auto）。
+
+`0x5703` / `0x4301` 的进度日志现在都带 `ssid / passphraseLength / channel / security / ip`（不含口令）；热点就绪时另有一行 `wireless handoff hints ssid=... passphraseLength=... passphraseSource=... hiddenSsid=...`；控制通道结束时 `wireless RFCOMM EOF` 带 `wirelessOfferedByPhone`。
+
+验证：`:shared:testDebugUnitTest` 206 项、`:common:testDebugUnitTest` 通过，0 失败。新增 `carPlayAvailabilityReadsTheWirelessTransportFlag`、`carPlayAvailabilityWithoutAWirelessGroupIsNotAWirelessRejection`、`prefersAnObservedChannelOverTheSavedApConfiguration`。未真机验证：真实 iPhone 上 `passphraseSource` 与 `wireless=0/1` 的实际取值、隐藏 SSID 提示，以及 `getPassphrase()` 在 MIUI 13 上是否可读。
+
+## 修正：iPhone 个人热点不阻塞加入系统热点（2026-11-03）
+
+上一版把「控制通道通了但没视频」归因于「iOS 不能同时当热点 AP 当 M 的客户端」，并写进了连接拓扑文档。用户复测推翻：iPhone 先开个人热点、再加入 CarPlay 系统热点是可以的；加不进去的是 **Wi-Fi Direct（P2P）**。因此：
+
+- `docs/CONNECTION-TOPOLOGY.md` 里该结论改为作废，并记录新结论；
+- 蓝牙引导失败的默认解释改回凭据问题，不再提示「先关个人热点」；
+- 新增按广播名下发 SSID：用扫描结果里 AP 接口 BSSID 对得上的那条取实际广播名（MIUI 桥接会加 `_5G` 后缀），与设置不一致时优先用广播名并提示——保存的名字可能根本不是实际广播的名字，这种不一致在 iOS 侧同样是静默失败。
+
+验证：`:shared:testDebugUnitTest`、`:common:testDebugUnitTest` 与 `:mobile:assembleDebug` 通过。新增 `prefersTheObservedBroadcastSsid`、`skipsTheBroadcastSsidNoticeWhenItMatches`。真机上待确认：MIUI 桥接下扫描结果能否命中 AP 接口 BSSID（无精确定位权限时拿不到扫描结果，此时仍使用设置值）。
+
+## 诊断报告新增「Wireless join (last attempt)」段（2026-11-03）
+
+蓝牙引导失败时本机拿不到 iOS 的任何回执，而导出的诊断报告会丢弃一切含网络名/口令的日志行，
+所以这一轮信息实际上从未进入 txt。现在：
+
+- 新增 `WirelessHandoffRecord`（shared，进程内）：按中性键记录上一次加入尝试的事实——
+  `iap2-credentials-requests`（收到几次 `0x5702`）、`iap2-config-sent` / `iap2-config-pushed`（是否是我主动补发）、
+  `iap2-wireless-available` / `iap2-wired-available` / `iap2-bluetooth-id-seen`（`0x4300` 的解析结果）、
+  `iap2-start-sessions`、`iap2-wireless-update`、`iap2-terminal`，以及热点侧的 `hotspot-channel` / `hotspot-security` /
+  `hotspot-band` / `hotspot-hidden` / `hotspot-name-check` / `key-source` / `key-length`（不含网络名、不含口令）。
+- 报告头部新增 `--- Wireless join (last attempt) ---` 段，直接打印 `result=` 与 `next=`（由事实推导的下一步检查）。
+- 每次用户点连接时清空记录；自动重连不清空，避免“第二次连蓝牙都没连上”把第一次的证据覆盖掉。
+- 相关日志行改为不含 `ssid` / `passphrase` 字样的键（`name-check`、`key-source`、`key-length`），否则会被
+  `DiagnosticRedactor` 整行丢弃；加入成功与看门狗超时时各写一行 `wireless join: ...` 摘要。
+
+验证：`:shared:testDebugUnitTest` 215 项、`:common:testDebugUnitTest` 204 项通过，0 失败；
+新增 `WirelessHandoffRecordTest`（7 项）覆盖空记录、字段打印、`next` 推导优先级与单行摘要。真机未验证。
+
+## 真机定位：上行是 iPhone 个人热点时 CarPlay 永远等不到 TCP（2026-11-04）
+
+用 adb（WSL + usbipd）+ root 直读设备状态，得到确定结论：
+
+- `wlan1` = AP `metaq` / 192.168.43.1/24；`wlan0` = managed `huanhua` / 172.20.10.4/28 / 5745 MHz —— 上行正是 iPhone 的个人热点（iOS 固定用 172.20.10.0/28）。
+- `hostapd.conf`：`hw_mode=a`、`chanlist=149 153 157 161`、`ieee80211w=0` —— 5 GHz、WPA2，所以下发的 `security=WPA_WPA2` 是对的；`channel=0` 也不是原因（两次成功都用 0）。
+- `iw dev wlan1 station dump` 无 iPhone 客户端；对照日志：STA 未关联时加入成功（10:03:43、10:04:35，后者 0.17 s 就来了 first TCP），STA 关联 huanhua 时 9 次全部 `did not join`。
+
+代码变更：
+
+- `WifiUplink.isIphonePersonalHotspot()`：匹配 172.20.10.1–14，识别"上行是 iPhone 个人热点"。
+- `CarPlayController` 在热点就绪时检测并写入日志、`WirelessHandoffRecord` 的 `uplink=iphone-hotspot`、以及热点状态提示。
+- `WirelessHandoffRecord.suggestNext()` 对该场景优先给出"关掉个人热点或换上行"，而不是笼统的"忽略网络"。
+- 待机去抖：断电 20 秒内恢复则完全取消待机；待机任务带 `wakeGeneration` 校验，唤醒抢先时放弃关射频，脚本已执行则恢复射频（真机日志里 20 秒的 root 关射频落在唤醒之后，把刚恢复的射频又关了）。
+
+**真机闭环验证（11-04 11:19–11:20，同一次会话）**：装上新包后日志为 `wireless uplink iphone-hotspot=true`，之后每 30 秒 `did not join`；11:19:14 在 iPhone 上关掉个人热点，`wlan0` 立刻失去地址（`sta=NONE`）；11:20:05 下一次重试即 `result=joined`，`/proc/net/arp` 出现 `192.168.43.188`（iPhone 作为 metaq 的客户端），随后 `airplay SETUP stream type=110` 出画面。全程没有在 App 里点任何按钮。**即插即用只差"关掉 iPhone 个人热点"这一步，与通道/安全类型无关（加入成功时 `channel=0`）。**
+
+验证：`:shared:testDebugUnitTest` 219 项、`:common:testDebugUnitTest` 205 项通过，0 失败。新增 `recognisesAnIphonePersonalHotspotUplink`、`aWakeThatRacesTheSlowStandbyAbortsTheRadioPowerOff`。
+
+## `0x5703` 带 BSSID + 上游启动次序 + Apple IE：真机一次通过（2026-11-04）
+
+对齐上游 `shihabal3amri/DiPlay` 的三处差异：
+
+- `0x5703` 参数 0 发 AP BSSID（上游 `accessoryWiFiConfiguration(..., bssid = endpoint.accessPointBssid)`；我们原先故意省略）。设备实测帧：`[0] BSSID: bytes=6 [7a 11 67 87 16 5d]`。
+- 启动次序改回上游：热点 → AirPlay → Bonjour → RFCOMM（我们此前是 RFCOMM 优先，为了 iPhone 不在时不开热点；该优化的代价是把 AP 广播和凭据投递压得太近）。
+- hostapd `vendor_elements=dd0800a0400000020021`（root 注入：`chattr -i` → 追加 → `chmod 444` → `chattr +i`；原始副本 `/data/local/tmp/hostapd.conf.orig`）。
+
+真机结果：此前必失败的状态（安卓连着 iPhone 热点）下，压住上行 3 秒后 first TCP、7 秒 joined，随后恢复上行，双链路稳定 90 秒以上，`session ended` 为 0。
+
+同时修掉凭据泄漏：`Iap2FrameFormatter` 对 `0x5703`/`0x5701` 把 SSID/passphrase/raw-body 全部替换为 `<redacted>`（此前 logcat 里能看到明文口令），新增单测 `theTraceNeverPrintsTheWifiPassphrase`。
+
+验证：`:shared` 224 项、`:common` 205 项通过，0 失败。未做 A/B，三项必要性与 IE 是否真的进入 beacon 尚未单独确认。
