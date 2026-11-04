@@ -345,7 +345,7 @@ SHA-256：
 - OEM 车厂名称与自定义图标、图片裁剪入口。
 - Android 定位上报与“定位来源”设置。
 
-保留浏览器音频/麦克风链路、WebCodecs、Tesla Root 兼容模式和 ACME/DuckDNS 证书功能。
+保留浏览器音频/麦克风链路、WebCodecs、Tesla Root 兼容模式和 ACME/DNSPod 证书功能。
 
 ## 通电电台顺序按信道约束调整（2026-10-29）
 

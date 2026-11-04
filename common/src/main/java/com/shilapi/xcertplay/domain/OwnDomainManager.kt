@@ -34,7 +34,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Keeps a DuckDNS A record pointed at this device and issues/renews a Let's Encrypt certificate
+ * Keeps a DNSPod A record pointed at this device and issues/renews a Let's Encrypt certificate
  * with an ACME DNS-01 challenge. The certificate is installed as the HTTPS listener's identity;
  * the existing certificate stays in place until a new one has been validated.
  */
@@ -157,7 +157,7 @@ internal object OwnDomainManager {
                 return
             }
             config.validate()?.let { throw OwnDomainException(it) }
-            // DuckDNS is the DNS/certificate part of Tesla compatibility: publish the same
+            // DNSPod is the DNS/certificate part of Tesla compatibility: publish the same
             // access address the car already uses for the HTTP/HTTPS listener.
             val address = TeslaHttpCompatibility.config(context).address
             // A new uplink restarts the backoff: the previous failures were about the old network.
@@ -168,15 +168,15 @@ internal object OwnDomainManager {
                 consecutiveFailures = 0
                 lastAttemptedAddress = address
             }
-            status = Status("检查中", "正在检查 DuckDNS 解析与证书", config.domain, address)
+            status = Status("检查中", "正在检查 DNSPod 解析与证书", config.domain, address)
             val networks = awaitInternetNetworks(context)
             if (networks.isEmpty()) {
                 throw OwnDomainException(
-                    "没有可用的互联网网络；请先连接 Wi-Fi 或移动数据后再更新 DuckDNS",
+                    "没有可用的互联网网络；请先连接 Wi-Fi 或移动数据后再更新 DNSPod",
                 )
             }
             var selected: InternetNetwork? = null
-            var duckFailure: Throwable? = null
+            var recordFailure: Throwable? = null
             for (network in networks) {
                 try {
                     updateRecord(context, config, address) { url ->
@@ -185,15 +185,15 @@ internal object OwnDomainManager {
                     selected = network
                     break
                 } catch (error: Throwable) {
-                    duckFailure = error
+                    recordFailure = error
                     log(
-                        "DuckDNS update failed via iface=${network.interfaceName}: " +
+                        "DNSPod update failed via iface=${network.interfaceName}: " +
                             (error.message ?: error.javaClass.simpleName).take(240),
                     )
                 }
             }
             val network = selected
-                ?: throw (duckFailure ?: OwnDomainException("DuckDNS 解析更新失败"))
+                ?: throw (recordFailure ?: OwnDomainException("DNSPod 解析更新失败"))
             log(
                 "using network iface=${network.interfaceName} " +
                     "validated=${network.validated}",
@@ -217,20 +217,25 @@ internal object OwnDomainManager {
                 return
             }
 
-            status = Status("申请中", "正在通过 DuckDNS 申请 Let's Encrypt 证书", config.domain, address)
+            status = Status("申请中", "正在通过 DNSPod 申请 Let's Encrypt 证书", config.domain, address)
             log("issuing certificate for ${config.domain} at $address")
             val issued = AcmeDns01Client(log = ::log, openConnection = openConnection).issue(
                 domain = config.domain,
                 accountKey = loadOrCreateAccountKey(context),
                 email = config.email,
                 setTxt = { value ->
-                    val result = DuckDnsApi.update(DuckDnsApi.txtUrl(config.subdomain, config.token, value))
-                    log("DuckDNS TXT update: ${result.response.lineSequence().firstOrNull().orEmpty()}")
-                    result.ok
+                    runCatching {
+                        DnspodApi.setChallengeTxt(config, value, openConnection)
+                    }.onFailure { error ->
+                        log("DNSPod TXT create failed: ${error.message ?: error.javaClass.simpleName}")
+                    }.isSuccess
                 },
                 clearTxt = {
-                    val result = DuckDnsApi.update(DuckDnsApi.clearTxtUrl(config.subdomain, config.token))
-                    log("DuckDNS TXT clear: ${result.response.lineSequence().firstOrNull().orEmpty()}")
+                    runCatching {
+                        DnspodApi.clearChallengeTxt(config, openConnection)
+                    }.onFailure { error ->
+                        log("DNSPod TXT cleanup failed: ${error.message ?: error.javaClass.simpleName}")
+                    }
                 },
             )
             val next = Stored(issued.chainPem, issued.keyPem, parseCertificate(issued.chainPem)
@@ -299,14 +304,13 @@ internal object OwnDomainManager {
         val now = System.currentTimeMillis()
         val last = OwnDomainSettings.lastRecordAddress(context)
         if (last == address && now - OwnDomainSettings.lastRecordAt(context) < RECORD_REFRESH_MILLIS) return
-        val result = try {
-            DuckDnsApi.update(DuckDnsApi.addressUrl(config.subdomain, config.token, address), openConnection)
+        try {
+            DnspodApi.updateAddress(config, address, openConnection)
         } catch (error: Throwable) {
             throw OwnDomainException(
-                "无法通过 HTTPS 连接 DuckDNS（${error.message ?: error.javaClass.simpleName}）",
+                "无法通过 HTTPS 连接 DNSPod（${error.message ?: error.javaClass.simpleName}）",
             )
         }
-        if (!result.ok) throw OwnDomainException("DuckDNS 更新解析失败：${result.response.take(160)}")
         OwnDomainSettings.saveRecord(context, address)
         log("A record ${config.domain} -> $address")
     }
@@ -317,7 +321,7 @@ internal object OwnDomainManager {
         val validated: Boolean,
     )
 
-    /** Bind DuckDNS/ACME traffic to a network that actually has internet access. */
+    /** Bind DNSPod/ACME traffic to a network that actually has internet access. */
     private fun awaitInternetNetworks(context: Context): List<InternetNetwork> {
         val deadline = System.currentTimeMillis() + INTERNET_WAIT_MILLIS
         var lastLog = 0L
@@ -341,7 +345,7 @@ internal object OwnDomainManager {
     /**
      * Returns internet-capable, non-VPN networks ordered from best to worst. The process default
      * may be the local AP, the Tesla alias, or a stale VPN during bring-up; binding each request
-     * avoids sending DuckDNS/ACME traffic out of an interface without upstream connectivity.
+     * avoids sending DNSPod/ACME traffic out of an interface without upstream connectivity.
      */
     private fun internetNetworks(context: Context): List<InternetNetwork> {
         val connectivity = context.getSystemService(ConnectivityManager::class.java) ?: return emptyList()

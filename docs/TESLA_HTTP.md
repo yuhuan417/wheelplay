@@ -17,7 +17,7 @@
 5. 等待「Root 热点路由已启用」，先用 `http://100.96.0.1/` 打开页面；**视频必须使用 HTTPS 入口 `https://100.96.0.1/`（HTTPS 映射默认 443）并让车机信任证书，WebCodecs 不会在 HTTP 页面出画面。** HTTP 入口仅用于设置与状态。拒绝 Root、缺少命令、端口占用或规则安装失败时，App 不展示已就绪的共享入口。修复后点击「重新启动 Root 路由」；不会持续重复申请 Root。
 6. 普通 HTTP 端口、Web 域名及可选 HTTPS 在「设置 → Web 监听」中配置，无需 Root。自备域名需配置 DNS A 记录，解析到实际访问 IP；填写域名不自动配置 DNS。映射端口不是 `80` 时使用 `http://你的域名:映射端口/`。地址、域名或端口变化后，浏览器需要重新打开页面。
 
-模式默认关闭，配置会保存。Root 检查结果仅在本次进程中有效，已启用时重新启动进程会自动重新检查；检查过程不阻塞普通 Web 监听。旧版本的端口与地址偏好保留；Web 域名和高位端口迁移到 Web 监听，旧低位端口迁移为映射端口，实际监听改用高位端口。Web 域名同时用于 HTTP 与 HTTPS；HTTPS 默认使用本地证书，启用 DuckDNS 后会安装 Let's Encrypt 证书。无 Root 时仍可使用普通局域网 HTTP/HTTPS 入口。
+模式默认关闭，配置会保存。Root 检查结果仅在本次进程中有效，已启用时重新启动进程会自动重新检查；检查过程不阻塞普通 Web 监听。旧版本的端口与地址偏好保留；Web 域名和高位端口迁移到 Web 监听，旧低位端口迁移为映射端口，实际监听改用高位端口。Web 域名同时用于 HTTP 与 HTTPS；HTTPS 默认使用本地证书，启用 DNSPod 自动证书后会安装 Let's Encrypt 证书。无 Root 时仍可使用普通局域网 HTTP/HTTPS 入口。
 
 ## Wi-Fi 联网检测应答（实验）
 
@@ -61,7 +61,7 @@
 5. 拒绝/撤销 Root，确认失败时不展示共享地址、不反复弹授权；恢复权限后手动重试。
 6. 打开「应答 Wi-Fi 联网检测」，断开热点上行网络后让车机重新加入：确认不再出现联网检测失败，车机可继续访问 WheelPlay；诊断日志应出现 probe 域名的 DNS 查询和 `/online/status.html` 请求。再关闭开关、停止 Web 服务、强杀 App，核对 DNS DNAT 规则与 15353 监听均已消失，车机 DNS 恢复正常。
 
-### DuckDNS 自动证书的触发时机
+### DNSPod 自动证书的触发时机
 
 - App / 前台服务启动时立即检查一次；
 - 恢复供电时，等 `RootRadioPower` 完成 Wi-Fi 关联、热点与蓝牙上电后再检查，避免网络未就绪就发起 ACME；
@@ -70,4 +70,22 @@
 - 证书剩余有效期 ≤ 30 天时续签；正常运行时每 6 小时检查一次，因此实际续签最多延迟约 6 小时；
 - A 记录随检查刷新；地址未变时最多每 6 小时刷新一次，地址变化会立即触发。
 
-在「设置 → Web 监听」打开「启用 HTTPS」后，可修改 Web HTTPS 端口；关闭后停止 HTTPS 监听并撤下 HTTPS 映射，HTTP 继续可用。默认本地证书包含配置的共享 IP 与可选域名，修改地址后会刷新。DuckDNS 自动证书使用同一访问 IP，并在签发后替换 HTTPS 证书。详见 [BROWSER_AUDIO.md](BROWSER_AUDIO.md)。
+在「设置 → Web 监听」打开「启用 HTTPS」后，可修改 Web HTTPS 端口；关闭后停止 HTTPS 监听并撤下 HTTPS 映射，HTTP 继续可用。默认本地证书包含配置的共享 IP 与可选域名，修改地址后会刷新。DNSPod 自动证书使用同一访问 IP，并在签发后替换 HTTPS 证书。详见 [BROWSER_AUDIO.md](BROWSER_AUDIO.md)。
+
+### DNSPod（腾讯云）配置项
+
+`设置 → Web 监听 → DNSPod 域名与自动证书` 需要四项：
+
+| 字段 | 说明 |
+|---|---|
+| 主域名 | DNSPod 中托管的主域名，例如 `example.com`（不是记录全名） |
+| 主机记录 | 主域名下的记录名，例如 `car` 表示 `car.example.com`；留空或 `@` 表示主域名本身 |
+| SecretId / SecretKey | 腾讯云访问管理里的 API 密钥，只需 DNSPod 的读/写解析权限 |
+
+实现要点：
+
+- 使用腾讯云 API v3（`dnspod.tencentcloudapi.com`，`2021-03-23`），请求用 TC3-HMAC-SHA256 签名；
+  项目离线构建，无 SDK，签名与报文构造在 `TencentCloudApi` 中手写并有单测。
+- A 记录：先 `DescribeRecordList` 查同主机记录的 A 记录，值相同则跳过，否则 `ModifyRecord`；没有就 `CreateRecord`。
+- ACME DNS-01：`CreateRecord` 建 `_acme-challenge.<记录>` 的 TXT（TTL 600），签发后删除；重建前先清理同名旧 TXT。
+- 密钥只存应用私有存储，不写入诊断日志；错误信息里也只会出现错误码与接口消息。

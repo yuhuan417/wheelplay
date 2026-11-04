@@ -18,15 +18,15 @@ CarPlay 音频始终只发送到当前车机浏览器，Android 不再本机播�
 
 ## Web 监听与 HTTPS 证书
 
-「设置 → Web 监听」包含 HTTP 端口（默认 `8080`）、Web 域名和 HTTPS 开关，无需 Root。Web 域名同时用于 HTTP 与 HTTPS，DNS 需解析到实际访问 IP。HTTPS 使用 App 管理的本地证书；启用 Tesla 兼容中的 DuckDNS 后，签发的 Let's Encrypt 证书会自动替换它。HTTPS 默认开启；关闭后停止 TLS 监听，隐藏 HTTPS 端口，保留证书与端口配置，HTTP 继续可用。
+「设置 → Web 监听」包含 HTTP 端口（默认 `8080`）、Web 域名和 HTTPS 开关，无需 Root。Web 域名同时用于 HTTP 与 HTTPS，DNS 需解析到实际访问 IP。HTTPS 使用 App 管理的本地证书；启用 Tesla 兼容中的 DNSPod 后，签发的 Let's Encrypt 证书会自动替换它。HTTPS 默认开启；关闭后停止 TLS 监听，隐藏 HTTPS 端口，保留证书与端口配置，HTTP 继续可用。
 
 开启 HTTPS 后可修改「Web HTTPS 端口」（默认 `8443`）。HTTP / HTTPS 实际监听端口范围均为 `1024–65535`，两者不能相同。运行中先绑定新端口；占用或绑定失败会保留原监听器和保存值。成功后浏览器需重新连接，iPhone 媒体会话保留；网页的「打开 HTTPS 页面」同步使用新端口。设置重启后仍有效。
 
 使用 `80` / `443` 等低位端口时，在「设置 → Tesla 兼容（实验）」第一行请求 Root 权限。授权成功后显示映射端口与访问 IP 设置；开启系统热点及此模式后，通过 Root 将访问 IP 的低位端口转发到 Web 监听高位端口。映射规则与热点路由统一安装和清理，失败不影响普通 Web 服务。普通 App 直接绑定低位端口可能得到 `EACCES`，仅对路由 shell 授权不会改变 App 进程的绑定权限。详见 [Tesla 兼容说明](TESLA_HTTP.md)。
 
-「Web 监听」不再提供证书类型选择，也不导入 PEM / PKCS#12。HTTPS 始终使用 App 私有存储中的本地 CA 证书；启用 DuckDNS 自动证书后，ACME 签发结果会安装为当前 HTTPS 身份。
+「Web 监听」不再提供证书类型选择，也不导入 PEM / PKCS#12。HTTPS 始终使用 App 私有存储中的本地 CA 证书；启用 DNSPod 自动证书后，ACME 签发结果会安装为当前 HTTPS 身份。
 
-本地 CA 证书包含启动时的局域网地址、配置的共享 IP 和可选域名。共享 IP / 域名修改后会自动刷新；其他局域网地址变化后请重新启动服务。使用 DuckDNS 时，证书必须覆盖配置的域名，解析地址与 Tesla 兼容的访问 IP 共用。
+本地 CA 证书包含启动时的局域网地址、配置的共享 IP 和可选域名。共享 IP / 域名修改后会自动刷新；其他局域网地址变化后请重新启动服务。使用 DNSPod 时，证书必须覆盖配置的域名，解析地址与 Tesla 兼容的访问 IP 共用。
 
 ## 音频行为
 

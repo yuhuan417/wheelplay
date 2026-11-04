@@ -329,7 +329,7 @@ class DiPlayActivity : AppCompatActivity() {
                     configureWeb("Web 域名已保存") { WebSession.setHostname(this, value.lowercase(Locale.ROOT)) }
                 }
             }.apply { isEnabled = !webBusy })
-            card.addView(label("监听设置无需 Root。Web 域名同时用于 HTTP 和 HTTPS，需解析到实际访问的 IP；填写不会自动配置 DNS。HTTPS 默认使用本地证书；启用 Tesla 兼容中的 DuckDNS 后会自动安装 Let's Encrypt 证书。", 14, MUTED))
+            card.addView(label("监听设置无需 Root。Web 域名同时用于 HTTP 和 HTTPS，需解析到实际访问的 IP；填写不会自动配置 DNS。HTTPS 默认使用本地证书；启用 Tesla 兼容中的 DNSPod 后会自动安装 Let's Encrypt 证书。", 14, MUTED))
             toggle(card, "启用 HTTPS", "为浏览器提供 HTTPS 访问；浏览器麦克风需要可信证书。", WebListenSettings.httpsEnabled(this), enabled = !webBusy) {
                 configureWeb(if (it) "HTTPS 已开启" else "HTTPS 已关闭") { WebSession.setHttpsEnabled(this, it) }
             }
@@ -395,7 +395,7 @@ class DiPlayActivity : AppCompatActivity() {
                 card.addView(button("重新启动 Root 路由", false) { TeslaHttpCompatibility.retry() }, ui.secondaryButtonLayout(12))
                 card.addView(button("打开热点设置", false) { openCarWifiSettings() }, ui.secondaryButtonLayout(12))
             }
-            card.addView(label("DuckDNS 域名与自动证书", 16, TEXT, true).apply {
+            card.addView(label("DNSPod 域名与自动证书", 16, TEXT, true).apply {
                 setPadding(0, dp(24), 0, dp(4))
             })
             ownDomainControls(card)
@@ -625,10 +625,10 @@ class DiPlayActivity : AppCompatActivity() {
     private fun ownDomainControls(card: LinearLayout) {
         val config = com.shilapi.xcertplay.domain.OwnDomainSettings.load(this)
         if (!TeslaHttpCompatibility.config(this).enabled) {
-            card.addView(label("Tesla 兼容当前未启用；DuckDNS 仍会按上方访问 IP 发布解析地址。", 14, MUTED))
+            card.addView(label("Tesla 兼容当前未启用；DNSPod 仍会按上方访问 IP 发布解析地址。", 14, MUTED))
         }
-        toggle(card, "启用 DuckDNS 域名与自动证书",
-            "Tesla 兼容的域名部分：通过 DuckDNS 的 DNS-01 验证向 Let's Encrypt 申请正式证书，到期前 30 天自动续签；解析地址与上方 Tesla 访问 IP 共用。",
+        toggle(card, "启用 DNSPod 域名与自动证书",
+            "Tesla 兼容的域名部分：通过腾讯云 DNSPod 的 DNS-01 验证向 Let's Encrypt 申请正式证书，到期前 30 天自动续签；解析地址与上方 Tesla 访问 IP 共用。",
             config.enabled) { enabled ->
             val next = config.copy(enabled = enabled)
             val problem = next.validate()
@@ -640,19 +640,36 @@ class DiPlayActivity : AppCompatActivity() {
             }
             render()
         }
-        card.addView(ui.preference("DuckDNS 子域名", config.subdomain.ifBlank { "未设置" }) {
-            textInput("DuckDNS 子域名", config.subdomain, false) { value ->
-                val next = config.copy(subdomain = value.trim().lowercase(Locale.ROOT)
-                    .removeSuffix(".duckdns.org").trim('.'))
+        card.addView(ui.preference("DNSPod 主域名", config.zone.ifBlank { "未设置" }) {
+            textInput("DNSPod 主域名（例如 example.com）", config.zone, false) { value ->
+                val next = config.copy(zone = value.trim().lowercase(Locale.ROOT).trim('.'))
                 val problem = next.validate()
                 if (problem != null) toast(problem) else {
                     com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
                 }
             }
         })
-        card.addView(ui.preference("DuckDNS Token", if (config.token.isBlank()) "未设置" else "已设置") {
-            textInput("DuckDNS Token", config.token, true) { value ->
-                val next = config.copy(token = value.trim())
+        card.addView(ui.preference("主机记录", config.record.ifBlank { "@（主域名）" }) {
+            textInput("主机记录（例如 car，留空表示主域名）", config.record, false) { value ->
+                val next = config.copy(record = value.trim().lowercase(Locale.ROOT))
+                val problem = next.validate()
+                if (problem != null) toast(problem) else {
+                    com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
+                }
+            }
+        })
+        card.addView(ui.preference("SecretId", if (config.secretId.isBlank()) "未设置" else "已设置") {
+            textInput("腾讯云 SecretId", config.secretId, true) { value ->
+                val next = config.copy(secretId = value.trim())
+                val problem = next.validate()
+                if (problem != null) toast(problem) else {
+                    com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
+                }
+            }
+        })
+        card.addView(ui.preference("SecretKey", if (config.secretKey.isBlank()) "未设置" else "已设置") {
+            textInput("腾讯云 SecretKey", config.secretKey, true) { value ->
+                val next = config.copy(secretKey = value.trim())
                 val problem = next.validate()
                 if (problem != null) toast(problem) else {
                     com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
@@ -690,9 +707,9 @@ class DiPlayActivity : AppCompatActivity() {
             append("证书安装后会替换当前 HTTPS 证书并重启 HTTPS 监听。")
             if (!WebListenSettings.httpsEnabled(this@DiPlayActivity)) append("当前 HTTPS 未启用，申请到的证书会先保存，启用 HTTPS 后生效。")
             append("车机请打开 https://")
-            append(config.domain.ifBlank { "<子域名>.duckdns.org" })
+            append(config.domain.ifBlank { "<主机记录>.<主域名>" })
             append(':').append(WebListenSettings.httpsPort(this@DiPlayActivity)).append("/。")
-            append("Token 仅保存在应用私有存储，不会写入诊断日志。")
+            append("SecretId/SecretKey 仅保存在应用私有存储，不会写入诊断日志。")
             append("停用后不会自动恢复默认证书，可在上方“证书类型”中恢复。")
         }, 14, MUTED))
     }

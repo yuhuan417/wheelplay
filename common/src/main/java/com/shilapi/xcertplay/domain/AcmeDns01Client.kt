@@ -31,7 +31,7 @@ import java.util.Base64
 /**
  * Minimal ACME v2 client for a single DNS-01 authorization, using an EC P-256 account key and
  * ES256 JWS. Android has no acme.sh/openssl CLI, so the protocol is implemented here; the caller
- * supplies the DNS TXT record operations (DuckDNS).
+ * supplies the DNS TXT record operations (DNSPod).
  */
 internal class AcmeDns01Client(
     private val directoryUrl: String = PRODUCTION_DIRECTORY,
@@ -99,8 +99,8 @@ internal class AcmeDns01Client(
         val keyAuthorization = "${challenge.token}.$thumbprint"
         val txtValue = b64(sha256(keyAuthorization.toByteArray(StandardCharsets.US_ASCII)))
         try {
-            if (!setTxt(txtValue)) throw AcmeException("DuckDNS rejected the ACME TXT record")
-            log("ACME TXT record published; waiting ${dnsWaitMillis / 1000}s for DuckDNS propagation")
+            if (!setTxt(txtValue)) throw AcmeException("DNSPod rejected the ACME TXT record")
+            log("ACME TXT record published; waiting ${dnsWaitMillis / 1000}s for DNS propagation")
             sleep(dnsWaitMillis)
             postJws(challenge.url, "{}", useJwk = false)
             pollAuthorization(authzUrl)

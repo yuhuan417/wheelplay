@@ -6,29 +6,66 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class OwnDomainConfigTest {
-    private val token = "12345678-1234-1234-1234-123456789abc"
+    private val secretId = "AKIDexample1234567890"
+    private val secretKey = "secretExample1234567890"
 
-    @Test fun disabledConfigIsAlwaysValid() {
-        assertNull(OwnDomainConfig(enabled = false, subdomain = "Bad Name", token = "x").validate())
+    private fun config(
+        zone: String = "example.com",
+        record: String = "car",
+        id: String = secretId,
+        key: String = secretKey,
+        email: String = "",
+    ) = OwnDomainConfig(
+        enabled = true,
+        zone = zone,
+        record = record,
+        secretId = id,
+        secretKey = key,
+        email = email,
+    )
+
+    @Test
+    fun disabledConfigIsAlwaysValid() {
+        assertNull(
+            OwnDomainConfig(enabled = false, zone = "Bad Zone", record = "x", secretId = "", secretKey = "")
+                .validate(),
+        )
     }
 
-    @Test fun acceptsALowercaseDuckDnsSubdomain() {
-        val config = OwnDomainConfig(enabled = true, subdomain = "my-car", token = token)
-        assertNull(config.validate())
-        assertEquals("my-car.duckdns.org", config.domain)
+    @Test
+    fun acceptsAZoneWithAHostRecord() {
+        assertNull(config().validate())
+        assertEquals("car.example.com", config().domain)
+        assertEquals("_acme-challenge.car", config().challengeHost)
     }
 
-    @Test fun rejectsBadSubdomainsAndTokens() {
-        assertNotNull(OwnDomainConfig(enabled = true, subdomain = "MyCar", token = token).validate())
-        assertNotNull(OwnDomainConfig(enabled = true, subdomain = "my_car", token = token).validate())
-        assertNotNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = "short").validate())
-        assertNotNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = "has space in it").validate())
+    @Test
+    fun anEmptyRecordMeansTheApex() {
+        assertNull(config(record = "").validate())
+        assertEquals("example.com", config(record = "").domain)
+        assertEquals("_acme-challenge", config(record = "").challengeHost)
     }
 
-    @Test fun validatesTheOptionalEmail() {
-        assertNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = token,
-            email = "driver@example.com").validate())
-        assertNotNull(OwnDomainConfig(enabled = true, subdomain = "mycar", token = token,
-            email = "not-an-email").validate())
+    @Test
+    fun rejectsMalformedZonesAndRecords() {
+        assertNotNull(config(zone = "example").validate())
+        assertNotNull(config(zone = "exa mple.com").validate())
+        assertNotNull(config(zone = "Example.com").validate())
+        assertNotNull(config(record = "car_bay").validate())
+        assertNotNull(config(record = "-car").validate())
+    }
+
+    @Test
+    fun rejectsMissingOrMalformedCredentials() {
+        assertNotNull(config(id = "").validate())
+        assertNotNull(config(key = "").validate())
+        assertNotNull(config(key = "has space in it").validate())
+        assertNotNull(config(key = "short").validate())
+    }
+
+    @Test
+    fun validatesTheOptionalEmail() {
+        assertNull(config(email = "driver@example.com").validate())
+        assertNotNull(config(email = "not-an-email").validate())
     }
 }

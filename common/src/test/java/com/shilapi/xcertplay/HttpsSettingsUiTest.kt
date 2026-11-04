@@ -166,7 +166,7 @@ class HttpsSettingsUiTest {
         } finally { RootAccess.authorize = original; controller.pause().stop().destroy(); WebSession.stop() }
     }
 
-    @Test fun settingsMergeDuckDnsIntoTeslaAndHideAuthenticationSections() {
+    @Test fun settingsMergeDnspodIntoTeslaAndHideAuthenticationSections() {
         val controller = Robolectric.buildActivity(DiPlayActivity::class.java).setup()
         val activity = controller.get()
         try {
@@ -177,7 +177,7 @@ class HttpsSettingsUiTest {
             assertFalse(texts.any { it == "证书类型" })
             assertFalse(texts.any { it == "自己的域名（DuckDNS 自动证书）" })
             assertFalse(texts.any { it == "解析地址（可选）" })
-            assertTrue(texts.any { it == "DuckDNS 域名与自动证书" })
+            assertTrue(texts.any { it == "DNSPod 域名与自动证书" })
             assertTrue(texts.any { it == "Tesla 兼容（实验）" })
         } finally { controller.pause().stop().destroy(); WebSession.stop() }
     }
