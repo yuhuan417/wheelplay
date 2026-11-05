@@ -28,14 +28,58 @@ data class OwnDomainConfig(
         else -> "$recordHost.$zone"
     }
 
+    /**
+     * Each field is validated on its own so the settings screen can save one field at a time; an
+     * empty field is not an error here, only a missing piece.
+     */
+    fun zoneError(): String? =
+        if (zone.isNotBlank() && !ZONE.matches(zone)) {
+            "域名格式不对，请填写 DNSPod 中托管的主域名，例如 example.com"
+        } else {
+            null
+        }
+
+    fun recordError(): String? =
+        if (record.isNotBlank() && !RECORD.matches(record)) {
+            "主机记录只能包含字母、数字、连字符；留空或 @ 表示主域名"
+        } else {
+            null
+        }
+
+    fun secretIdError(): String? =
+        if (secretId.isNotBlank() && !SECRET.matches(secretId)) {
+            "SecretId 格式不对，请在腾讯云访问管理控制台创建 API 密钥"
+        } else {
+            null
+        }
+
+    fun secretKeyError(): String? =
+        if (secretKey.isNotBlank() && !SECRET.matches(secretKey)) {
+            "SecretKey 格式不对，请重新复制 API 密钥"
+        } else {
+            null
+        }
+
+    fun emailError(): String? =
+        if (email.isNotBlank() && !EMAIL.matches(email)) "证书邮箱格式不对" else null
+
+    /** What is still missing before the feature can be switched on. */
+    fun missingRequiredField(): String? = when {
+        zone.isBlank() -> "请先填写 DNSPod 主域名"
+        secretId.isBlank() -> "请先填写腾讯云 SecretId"
+        secretKey.isBlank() -> "请先填写腾讯云 SecretKey"
+        else -> null
+    }
+
+    /** Full check, used when enabling and by the scheduler. */
     fun validate(): String? = when {
         !enabled -> null
-        !ZONE.matches(zone) -> "域名格式不对，请填写 DNSPod 中托管的主域名，例如 example.com"
-        !RECORD.matches(recordHost) -> "主机记录只能包含字母、数字、连字符，留空或 @ 表示主域名"
-        !SECRET.matches(secretId) -> "SecretId 格式不对，请在腾讯云访问管理控制台创建 API 密钥"
-        !SECRET.matches(secretKey) -> "SecretKey 格式不对，请重新复制 API 密钥"
-        email.isNotBlank() && !EMAIL.matches(email) -> "证书邮箱格式不对"
-        else -> null
+        else -> missingRequiredField()
+            ?: zoneError()
+            ?: recordError()
+            ?: secretIdError()
+            ?: secretKeyError()
+            ?: emailError()
     }
 
     companion object {

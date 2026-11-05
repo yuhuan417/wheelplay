@@ -640,10 +640,13 @@ class DiPlayActivity : AppCompatActivity() {
             }
             render()
         }
+        config.missingRequiredField()?.let { missing ->
+            card.addView(label("还差：$missing（四项都填好后才能启用）", 14, WARNING))
+        }
         card.addView(ui.preference("DNSPod 主域名", config.zone.ifBlank { "未设置" }) {
             textInput("DNSPod 主域名（例如 example.com）", config.zone, false) { value ->
                 val next = config.copy(zone = value.trim().lowercase(Locale.ROOT).trim('.'))
-                val problem = next.validate()
+                val problem = next.zoneError()
                 if (problem != null) toast(problem) else {
                     com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
                 }
@@ -652,7 +655,7 @@ class DiPlayActivity : AppCompatActivity() {
         card.addView(ui.preference("主机记录", config.record.ifBlank { "@（主域名）" }) {
             textInput("主机记录（例如 car，留空表示主域名）", config.record, false) { value ->
                 val next = config.copy(record = value.trim().lowercase(Locale.ROOT))
-                val problem = next.validate()
+                val problem = next.recordError()
                 if (problem != null) toast(problem) else {
                     com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
                 }
@@ -661,7 +664,7 @@ class DiPlayActivity : AppCompatActivity() {
         card.addView(ui.preference("SecretId", if (config.secretId.isBlank()) "未设置" else "已设置") {
             textInput("腾讯云 SecretId", config.secretId, true) { value ->
                 val next = config.copy(secretId = value.trim())
-                val problem = next.validate()
+                val problem = next.secretIdError()
                 if (problem != null) toast(problem) else {
                     com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
                 }
@@ -670,7 +673,7 @@ class DiPlayActivity : AppCompatActivity() {
         card.addView(ui.preference("SecretKey", if (config.secretKey.isBlank()) "未设置" else "已设置") {
             textInput("腾讯云 SecretKey", config.secretKey, true) { value ->
                 val next = config.copy(secretKey = value.trim())
-                val problem = next.validate()
+                val problem = next.secretKeyError()
                 if (problem != null) toast(problem) else {
                     com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
                 }
@@ -679,7 +682,7 @@ class DiPlayActivity : AppCompatActivity() {
         card.addView(ui.preference("证书通知邮箱（可选）", config.email.ifBlank { "未设置" }) {
             textInput("证书通知邮箱（可选）", config.email, false) { value ->
                 val next = config.copy(email = value.trim())
-                val problem = next.validate()
+                val problem = next.emailError()
                 if (problem != null) toast(problem) else {
                     com.shilapi.xcertplay.domain.OwnDomainSettings.save(this, next); render()
                 }
