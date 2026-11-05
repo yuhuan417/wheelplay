@@ -458,3 +458,15 @@ SHA-256：
 同时修掉凭据泄漏：`Iap2FrameFormatter` 对 `0x5703`/`0x5701` 把 SSID/passphrase/raw-body 全部替换为 `<redacted>`（此前 logcat 里能看到明文口令），新增单测 `theTraceNeverPrintsTheWifiPassphrase`。
 
 验证：`:shared` 224 项、`:common` 205 项通过，0 失败。未做 A/B，三项必要性与 IE 是否真的进入 beacon 尚未单独确认。
+
+## DNSPod 自动证书：真机签发成功（2026-11-05）
+
+在真实腾讯云账号上完成一次完整流程（`设置 → Web 监听 → DNSPod 域名与自动证书`）：
+
+- 配置四项（主域名 / 主机记录 / SecretId / SecretKey）后启用，点"立即检查 / 申请证书"；
+- TC3-HMAC-SHA256 签名被服务端接受，`DescribeRecordList` 查到 A 记录并被 `ModifyRecord` 更新；
+- ACME DNS-01 的 `_acme-challenge.<记录>` TXT 记录创建成功，`Let's Encrypt` 校验通过并签发；
+- 证书安装为 HTTPS 监听身份。
+
+这一条把此前"DuckDNS 更新接口在部分网络不可达"的阻塞彻底绕开了：DNSPod 接口在国内网络可直连。
+`TencentCloudApi` 的签名与 `DnspodApi` 的四个报文此前只有单测覆盖，本次是首次真机验证。
