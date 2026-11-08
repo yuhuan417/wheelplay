@@ -166,7 +166,13 @@ internal object TeslaHttpCompatibility {
             probe.stop()
             return result.copy(probe = false, probeError = result.error ?: "Root 路由未就绪")
         }
-        if (!probe.start("0.0.0.0", plan.address, upstreamProvider(context, plan))) {
+        if (!probe.start(
+                "0.0.0.0",
+                plan.address,
+                uplinkIsOnline = uplinkOnlineProvider(context),
+                upstream = upstreamProvider(context, plan),
+            )
+        ) {
             return result.copy(probe = false, probeError = probe.error)
         }
         return result.copy(probe = true, probeRequests = probe.requests, probeError = null)
@@ -187,6 +193,31 @@ internal object TeslaHttpCompatibility {
                 servers = upstreamServers(context, plan)
             }
             servers
+        }
+    }
+
+    /**
+     * True while some network can actually reach the internet. Then the probe names are resolved
+     * upstream so the car talks to the real services instead of this device's alias.
+     */
+    private fun uplinkOnlineProvider(context: Context): () -> Boolean {
+        var checkedAt = 0L
+        var online = false
+        return {
+            val now = SystemClock.elapsedRealtime()
+            if (now - checkedAt > 5_000) {
+                checkedAt = now
+                online = runCatching {
+                    val manager = context.getSystemService(ConnectivityManager::class.java)
+                        ?: return@runCatching false
+                    manager.allNetworks.any { network ->
+                        val capabilities = manager.getNetworkCapabilities(network) ?: return@any false
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                    }
+                }.getOrDefault(false)
+            }
+            online
         }
     }
 

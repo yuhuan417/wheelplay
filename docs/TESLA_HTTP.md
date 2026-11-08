@@ -106,3 +106,16 @@
 来源：`wz980305/AutoPlay` 的 `box/scripts/onecloud/tesla_checks.py` 与 `tesla_openwrt.py`
 （`CONNMAN_NAMES` / `TESLA_CHECK_NAMES` / `check_response`），其注释记录了 2026-10-15 中国车实测
 "connman alone is insufficient"。
+
+### 有上行时转发，没有才本地应答
+
+联网检测的应答分两种情况（`TeslaWifiProbeServer.start(..., uplinkIsOnline, upstream)`）：
+
+| 上行状态 | probe 域名的 DNS | 结果 |
+|---|---|---|
+| 有可用上行（有 `NET_CAPABILITY_VALIDATED` 的网络） | **转发给上游解析** | 车机直接访问真实的 ConnMan/百度/QQ/特斯拉，外网正常 |
+| 没有上行 | 解析到本机 Tesla 访问 IP | 车机仍认为 Wi-Fi 在线，不会回落 LTE |
+
+上游解析失败时会退回本地应答，所以"有上行但那一刻断了"也不会让车判离线。判断结果缓存 5 秒，
+不按包查询 ConnectivityManager。日志会区分两种情况：
+`… 查询 probe 域名，有上行，转发上游` / `… 无上行，本地应答`。

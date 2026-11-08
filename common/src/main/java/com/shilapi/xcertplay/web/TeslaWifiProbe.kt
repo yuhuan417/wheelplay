@@ -125,11 +125,19 @@ internal object ProbeDns {
      * Returns a DNS response for [packet], or null when the packet is not a usable query.
      * Non-probe names are delegated to [forward]; a failed forward becomes SERVFAIL.
      */
-    fun answer(packet: ByteArray, address: Inet4Address, forward: (ByteArray) -> ByteArray?): ByteArray? {
+    fun answer(
+        packet: ByteArray,
+        address: Inet4Address,
+        preferUpstream: Boolean = false,
+        forward: (ByteArray) -> ByteArray?,
+    ): ByteArray? {
         val question = parse(packet) ?: return null
         if (question.qclass != CLASS_IN || question.name.trimEnd('.').lowercase() !in TeslaWifiProbe.HOSTS) {
             return forward(packet) ?: response(packet, question, null, RCODE_SERVFAIL)
         }
+        // With a working uplink the car should reach the real services, so the upstream answer wins;
+        // the local alias is only the fallback that keeps the car "online" without one.
+        if (preferUpstream) forward(packet)?.let { return it }
         return when (question.type) {
             TYPE_A -> response(packet, question, address.address, 0)
             // AAAA and other types return NOERROR with no answer so the client falls back to A.
@@ -234,6 +242,7 @@ internal class TeslaWifiProbeServer {
     private var listenAddress: Inet4Address? = null
     private var answerAddress: Inet4Address? = null
     private var upstreams: () -> List<InetAddress> = { emptyList() }
+    private var uplinkOnline: () -> Boolean = { false }
     private val counted = AtomicInteger()
 
     @Volatile var running = false
@@ -243,7 +252,12 @@ internal class TeslaWifiProbeServer {
     val requests get() = counted.get()
 
     @Synchronized
-    fun start(listenHost: String, answerHost: String, upstream: () -> List<InetAddress>): Boolean {
+    fun start(
+        listenHost: String,
+        answerHost: String,
+        uplinkIsOnline: () -> Boolean = { false },
+        upstream: () -> List<InetAddress>,
+    ): Boolean {
         val listen = parseAddress(listenHost) ?: return fail("DNS 监听地址无效")
         val answer = parseAddress(answerHost) ?: return fail("访问 IP 无效")
         // Keep the existing upstream closure (and its cache) while the endpoint is unchanged.
@@ -259,6 +273,7 @@ internal class TeslaWifiProbeServer {
             listenAddress = listen
             answerAddress = answer
             upstreams = upstream
+            uplinkOnline = uplinkIsOnline
             error = null
             running = true
             thread = Thread({ receive(bound, answer) }, "tesla-wifi-probe").apply {
@@ -314,13 +329,29 @@ internal class TeslaWifiProbeServer {
             if (ProbeDns.isProbe(query)) {
                 counted.incrementAndGet()
                 Log.i(TAG, "Wi-Fi probe DNS query from ${client.hostAddress}")
-                DiagnosticLogSink.append("Wi-Fi 联网检测：${client.hostAddress} 查询 probe 域名")
-                // Answer the probe inline so it never queues behind uplink lookups.
-                val reply = runCatching { ProbeDns.answer(query, local) { null } }.getOrNull()
-                send(bound, reply, client, port)
+                if (uplinkOnline()) {
+                    // There is a real uplink: let the car resolve the service and reach it, and fall
+                    // back to the local alias only if the upstream lookup fails.
+                    DiagnosticLogSink.append(
+                        "Wi-Fi 联网检测：${client.hostAddress} 查询 probe 域名，有上行，转发上游",
+                    )
+                    executor.execute {
+                        val reply = runCatching {
+                            ProbeDns.answer(query, local, preferUpstream = true, forward = ::forward)
+                        }.getOrNull()
+                        send(bound, reply, client, port)
+                    }
+                } else {
+                    DiagnosticLogSink.append(
+                        "Wi-Fi 联网检测：${client.hostAddress} 查询 probe 域名，无上行，本地应答",
+                    )
+                    // Answer the probe inline so it never queues behind uplink lookups.
+                    val reply = runCatching { ProbeDns.answer(query, local, forward = { null }) }.getOrNull()
+                    send(bound, reply, client, port)
+                }
             } else {
                 executor.execute {
-                    val reply = runCatching { ProbeDns.answer(query, local, ::forward) }.getOrNull()
+                    val reply = runCatching { ProbeDns.answer(query, local, forward = ::forward) }.getOrNull()
                     send(bound, reply, client, port)
                 }
             }
