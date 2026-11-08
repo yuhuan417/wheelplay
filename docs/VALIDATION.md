@@ -470,3 +470,31 @@ SHA-256：
 
 这一条把此前"DuckDNS 更新接口在部分网络不可达"的阻塞彻底绕开了：DNSPod 接口在国内网络可直连。
 `TencentCloudApi` 的签名与 `DnspodApi` 的四个报文此前只有单测覆盖，本次是首次真机验证。
+
+## ConnMan Wi-Fi 联网检测：真机应答成功（2026-11-08）
+
+在连接热点的设备上直接验证了整条链路：
+
+```
+$ curl -i http://connman.vn.cloud.tesla.cn/online/status.html
+HTTP/1.1 200 OK
+Content-Type: text/html
+Cache-Control: no-store
+X-ConnMan-Status: online
+Content-Length: 46
+
+<html>
+<head>
+</head>
+<body>
+</body>
+</html>
+```
+
+三件事同时得到证明：
+
+1. `ProbeDns`（UDP 15353）把 `connman.vn.cloud.tesla.cn` 解析到 Tesla 兼容访问地址，而不是真实的外网 IP；
+2. 低端口映射把 80 端口的请求送进了 Web 监听；
+3. `LanWebServer` 在 `/online/status.html` 返回 ConnMan 期望的 200、`X-ConnMan-Status: online` 和 46 字节空页面。
+
+因此热点没有上行时，车机也会认为 Wi-Fi 在线，不会回落到 LTE。注意探测**必须带 `/online/status.html` 路径**；访问根路径 `/` 得到的是正常车机显示页。
