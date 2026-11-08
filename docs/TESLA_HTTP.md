@@ -89,3 +89,20 @@
 - A 记录：先 `DescribeRecordList` 查同主机记录的 A 记录，值相同则跳过，否则 `ModifyRecord`；没有就 `CreateRecord`。
 - ACME DNS-01：`CreateRecord` 建 `_acme-challenge.<记录>` 的 TXT（TTL 600），签发后删除；重建前先清理同名旧 TXT。
 - 密钥只存应用私有存储，不写入诊断日志；错误信息里也只会出现错误码与接口消息。
+
+### 车机的联网检测不止 ConnMan（按上游 DashPlay/AutoPlay 的实测）
+
+中国市场的车会依次探测 **8 个名字**，只应答 ConnMan 会让车判定"这个 Wi-Fi 没有 internet"：
+
+| 名字 | 应答 |
+|---|---|
+| `connman.vn.cloud.tesla.cn`、`connman.vn.tesla.services`（另加 `.com`） | `200` + 46 字节空页面 + `X-ConnMan-Status: online` + `X-Cache: Hit from cloudfront` |
+| `www.baidu.cn`、`www.baidu.com`、`www.qq.com`、`www.tesla.cn` | `200` + `<html><body>online</body></html>` |
+| `connectivitycheck.gstatic.com`（`/generate_204`、`/gen_204`） | `204`，空体 |
+
+判定**按 Host 匹配**（去端口、去末尾点、转小写），不是按路径；`/online/status.html`
+只在用 IP 直接访问时作为兜底。所有名字都由 `ProbeDns` 解析到 Tesla 兼容访问地址，请求不会外发。
+
+来源：`wz980305/AutoPlay` 的 `box/scripts/onecloud/tesla_checks.py` 与 `tesla_openwrt.py`
+（`CONNMAN_NAMES` / `TESLA_CHECK_NAMES` / `check_response`），其注释记录了 2026-10-15 中国车实测
+"connman alone is insufficient"。

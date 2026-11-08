@@ -336,6 +336,33 @@ class LanWebServerTest {
         } finally { WebSession.stop() }
     }
 
+    @Test fun connectivityChecksAreAnsweredByHostNotByPath() {
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        WebSession.start(context)
+        try {
+            // The car asks these names for arbitrary paths; HttpURLConnection rewrites Host, so raw.
+            val connman = rawGet("/anything", "connman.vn.cloud.tesla.cn")
+            assertTrue(connman.contains("X-ConnMan-Status: online"))
+            assertTrue(connman.endsWith(String(TeslaWifiProbe.STATUS_BODY, Charsets.US_ASCII)))
+
+            val baidu = rawGet("/", "www.baidu.cn")
+            assertTrue(baidu.contains("online"))
+            assertFalse(baidu.contains("X-ConnMan-Status"))
+
+            val chromium = rawGet("/generate_204", "connectivitycheck.gstatic.com")
+            assertTrue(chromium.startsWith("HTTP/1.1 204"))
+        } finally { WebSession.stop() }
+    }
+
+    private fun rawGet(path: String, host: String): String = Socket("127.0.0.1", 8080).use { socket ->
+        socket.soTimeout = 3000
+        socket.getOutputStream().write(
+            ("GET $path HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n").toByteArray(),
+        )
+        socket.getOutputStream().flush()
+        socket.getInputStream().readBytes().toString(Charsets.UTF_8)
+    }
+
     private fun handshake(code: String = "", origin: String = "http://127.0.0.1:8080", token: String = "", host: String = "127.0.0.1:8080", port: Int = 8080): Socket = Socket("127.0.0.1", port).apply {
         soTimeout = 3000
         getOutputStream().write(("GET /stream HTTP/1.1\r\nHost: $host\r\n" +

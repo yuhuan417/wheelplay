@@ -28,17 +28,72 @@ internal object TeslaWifiProbe {
     const val DNS_PORT = 15353
     const val STATUS_PATH = "/online/status.html"
 
-    /** Probe names used by Tesla's ConnMan builds; all are answered with the access address. */
-    val HOSTS = setOf(
+    /** ConnMan names: answered with the status page and the online header. */
+    val CONNMAN_HOSTS = setOf(
         "connman.vn.cloud.tesla.cn",
         "connman.vn.cloud.tesla.com",
         "connman.vn.tesla.services",
     )
 
+    /**
+     * Names a China-market car (and its browser) probes in addition to ConnMan. Answering only
+     * ConnMan was proven insufficient: the car also checks these and treats a failure as "this
+     * Wi-Fi has no internet" even when ConnMan was told "online".
+     */
+    val EXTRA_PROBE_HOSTS = setOf("www.baidu.cn", "www.baidu.com", "www.qq.com", "www.tesla.cn")
+
+    /** Chromium's own check, which expects an empty 204 instead of a page. */
+    const val CHROMIUM_HOST = "connectivitycheck.gstatic.com"
+
+    /** Every name answered locally; [ProbeDns] resolves all of them to the access address. */
+    val HOSTS = CONNMAN_HOSTS + EXTRA_PROBE_HOSTS + CHROMIUM_HOST
+
     /** Exact 46-byte body served by the production endpoint, including the trailing blank line. */
     val STATUS_BODY = "<html>\n<head>\n</head>\n<body>\n</body>\n</html>\n\n".toByteArray(Charsets.US_ASCII)
+
+    /** Body for the extra check names; matches what the box upstream serves for them. */
+    val ONLINE_BODY = "<html><body>online</body></html>\n".toByteArray(Charsets.US_ASCII)
+
     const val STATUS_HEADER = "X-ConnMan-Status"
     const val STATUS_HEADER_VALUE = "online"
+
+    /** Copied from the real ConnMan servers so the car sees the same response shape. */
+    const val CACHE_HEADER = "X-Cache"
+    const val CACHE_HEADER_VALUE = "Hit from cloudfront"
+
+    /** One locally produced connectivity answer. */
+    data class Answer(val status: Int, val body: ByteArray, val connman: Boolean)
+
+    /**
+     * Answer for a probe request, or null when the request is a normal page hit.
+     *
+     * Host-based on purpose: the car asks these names for any path, and a foreign page reads as a
+     * captive portal. `/online/status.html` is still honoured by path for IP-addressed access.
+     */
+    fun answer(hostHeader: String?, path: String): Answer? {
+        val host = normalizeHost(hostHeader)
+        if (host != null) {
+            when (host) {
+                in CONNMAN_HOSTS -> return Answer(200, STATUS_BODY, connman = true)
+                CHROMIUM_HOST -> return if (path.substringBefore('?') in CHROMIUM_PATHS) {
+                    Answer(204, ByteArray(0), connman = false)
+                } else {
+                    Answer(200, ONLINE_BODY, connman = false)
+                }
+                in EXTRA_PROBE_HOSTS -> return Answer(200, ONLINE_BODY, connman = false)
+            }
+        }
+        if (path.startsWith(STATUS_PATH)) return Answer(200, STATUS_BODY, connman = true)
+        return null
+    }
+
+    private val CHROMIUM_PATHS = setOf("/generate_204", "/gen_204")
+
+    /** Lowercases the Host header and drops the port and a trailing dot. */
+    fun normalizeHost(hostHeader: String?): String? {
+        val host = hostHeader?.substringBefore(':')?.trim()?.trimEnd('.')?.lowercase() ?: return null
+        return host.ifEmpty { null }
+    }
 }
 
 /** Minimal DNS wire handling: answer the probe names and relay everything else to the uplink DNS. */

@@ -57,18 +57,31 @@ internal class LanWebServer(private val context: Context, port: Int = WebListenS
     }
 
     override fun serveHttp(session: IHTTPSession): Response {
-        if (session.method != Method.GET) return response(Response.Status.METHOD_NOT_ALLOWED, "GET only")
-        if (session.uri == TeslaWifiProbe.STATUS_PATH) {
-            // ConnMan's plain-HTTP online check: 200 means "this Wi-Fi has internet". The rooted
-            // Tesla compatibility routing resolves the probe host names here instead of Tesla.
-            android.util.Log.i("WheelPlayTesla", "Wi-Fi internet check from ${session.remoteIpAddress} (${session.headers["host"]})")
-            DiagnosticLogSink.append("Wi-Fi 联网检测：HTTP 请求来自 ${session.remoteIpAddress}（${session.headers["host"]}）")
+        // Connectivity checks decide whether the car trusts this Wi-Fi. They are plain HTTP, so the
+        // rooted routing resolves these names here and the answers below are served locally.
+        TeslaWifiProbe.answer(session.headers["host"], session.uri)?.let { probe ->
+            android.util.Log.i(
+                "WheelPlayTesla",
+                "Wi-Fi internet check from ${session.remoteIpAddress}: " +
+                    "${session.method} ${session.uri} (${session.headers["host"]})",
+            )
+            DiagnosticLogSink.append(
+                "Wi-Fi 联网检测：${session.method} ${session.uri} 来自 " +
+                    "${session.remoteIpAddress}（${session.headers["host"]}）",
+            )
+            if (probe.status == 204) {
+                return response(Response.Status.NO_CONTENT, "")
+            }
             return newFixedLengthResponse(Response.Status.OK, "text/html",
-                TeslaWifiProbe.STATUS_BODY.inputStream(), TeslaWifiProbe.STATUS_BODY.size.toLong()).apply {
-                addHeader(TeslaWifiProbe.STATUS_HEADER, TeslaWifiProbe.STATUS_HEADER_VALUE)
+                probe.body.inputStream(), probe.body.size.toLong()).apply {
+                if (probe.connman) {
+                    addHeader(TeslaWifiProbe.STATUS_HEADER, TeslaWifiProbe.STATUS_HEADER_VALUE)
+                    addHeader(TeslaWifiProbe.CACHE_HEADER, TeslaWifiProbe.CACHE_HEADER_VALUE)
+                }
                 addHeader("Cache-Control", "no-store")
             }
         }
+        if (session.method != Method.GET) return response(Response.Status.METHOD_NOT_ALLOWED, "GET only")
         if (session.uri == "/tls.json") return newFixedLengthResponse(Response.Status.OK, "application/json",
             JSONObject().put("available", WebSession.httpsReady).put("fingerprint", WebSession.tls?.fingerprint)
                 .put("port", WebSession.httpsPortFor(context, session.headers["host"])).put("customCertificate", WebSession.tls?.custom == true)
