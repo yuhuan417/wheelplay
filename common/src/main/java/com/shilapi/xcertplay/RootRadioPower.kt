@@ -187,6 +187,21 @@ internal object RootRadioPower {
         return false
     }
 
+    /**
+     * Names the radios that are on although standby turned them off, or null when everything
+     * stayed off. Used by the standby guard to detect a wake nobody asked for.
+     */
+    internal fun radiosBackOn(context: Context): String? {
+        val app = context.applicationContext
+        val wifi = runCatching {
+            app.getSystemService(WifiManager::class.java)?.isWifiEnabled == true
+        }.getOrDefault(false)
+        val hotspot = runCatching { CarHotspotStatus.isEnabled(app) }.getOrNull() == true
+        val bluetooth = runCatching { bluetoothEnabled(app) }.getOrDefault(false)
+        if (!wifi && !hotspot && !bluetooth) return null
+        return "wifi=$wifi hotspot=$hotspot bluetooth=$bluetooth"
+    }
+
     private fun defaultVerifyRadioOff(context: Context): Boolean {
         val wifiOff = runCatching {
             context.getSystemService(WifiManager::class.java)?.isWifiEnabled == false

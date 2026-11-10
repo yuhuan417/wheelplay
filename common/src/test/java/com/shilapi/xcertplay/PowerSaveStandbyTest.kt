@@ -319,6 +319,68 @@ class PowerSaveStandbyTest {
     }
 
     @Test
+    fun standbyGuardCutsTheRadiosAgainWhenSomethingTurnsThemBackOn() {
+        val originalAvailable = RootRadioPower.rootAvailable
+        val originalExecute = RootRadioPower.executeRootScript
+        val originalVerify = RootRadioPower.verifyRadioOff
+        val originalBluetoothEnabled = RootRadioPower.bluetoothEnabled
+        val originalSetBluetooth = RootRadioPower.setBluetoothEnabled
+        val standbyScripts = java.util.concurrent.atomic.AtomicInteger()
+        try {
+            RootRadioPower.rootAvailable = { true }
+            RootRadioPower.verifyRadioOff = { true }
+            RootRadioPower.bluetoothEnabled = { false }
+            RootRadioPower.setBluetoothEnabled = { _, _ -> }
+            RootRadioPower.executeRootScript = { script ->
+                if (script.contains("RootHotspotMain stop")) standbyScripts.incrementAndGet()
+                true
+            }
+
+            val controller = Robolectric.buildService(DiPlaySessionService::class.java).create()
+            val service = controller.get()
+            service.onStartCommand(Intent(app, DiPlaySessionService::class.java), 0, 1)
+            shadowOf(Looper.getMainLooper()).idle()
+
+            CarPlayBackgroundSession.markStandby(
+                owner = this,
+                wake = {},
+                standby = {},
+                stop = { it() },
+            )
+            service.onStartCommand(
+                Intent(app, DiPlaySessionService::class.java)
+                    .setAction(DiPlaySessionService.ACTION_STANDBY),
+                0,
+                2,
+            )
+            val deadline = System.currentTimeMillis() + 5_000
+            while (RootRadioPower.lastStandbyRadioOff != true && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20)
+            }
+            assertEquals(true, RootRadioPower.lastStandbyRadioOff)
+            assertEquals(1, standbyScripts.get())
+
+            // Something outside the app turns a radio back on while the phone stays unplugged.
+            RootRadioPower.bluetoothEnabled = { true }
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(31))
+            val guardDeadline = System.currentTimeMillis() + 5_000
+            while (standbyScripts.get() < 2 && System.currentTimeMillis() < guardDeadline) {
+                Thread.sleep(20)
+            }
+            assertEquals("the guard has to cut the radios again", 2, standbyScripts.get())
+            controller.destroy()
+        } finally {
+            RootRadioPower.rootAvailable = originalAvailable
+            RootRadioPower.executeRootScript = originalExecute
+            RootRadioPower.verifyRadioOff = originalVerify
+            RootRadioPower.bluetoothEnabled = originalBluetoothEnabled
+            RootRadioPower.setBluetoothEnabled = originalSetBluetooth
+            RootRadioPower.suspendedByStandby = false
+            RootRadioPower.lastStandbyRadioOff = null
+        }
+    }
+
+    @Test
     fun hotspotStillStartsWhenTheStaNeverAssociates() {
         val originalAvailable = RootRadioPower.rootAvailable
         val originalExecute = RootRadioPower.executeRootScript

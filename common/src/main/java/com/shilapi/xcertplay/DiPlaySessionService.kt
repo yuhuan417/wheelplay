@@ -8,6 +8,7 @@ import com.shilapi.xcertplay.media.MediaCommand
 import com.shilapi.xcertplay.media.NowPlayingState
 import android.annotation.SuppressLint
 import android.os.PowerManager
+import android.util.Log
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -50,6 +51,39 @@ class DiPlaySessionService : Service() {
     private var currentState = NowPlayingState()
     private var currentSession: MediaSession? = null
     private var currentArtwork: Bitmap? = null
+
+    /**
+     * Runs while the device sits in power-save standby. MIUI (and anything else outside this app)
+     * can bring Wi-Fi, the hotspot or Bluetooth back on without a wake request; this notices it,
+     * records it and cuts the radios again instead of silently draining the battery.
+     */
+    private val standbyGuard = object : Runnable {
+        override fun run() {
+            if (destroyed || activationBlocked || !standby) return
+            // Only meaningful once a standby teardown actually verified the radios are off.
+            if (RootRadioPower.lastStandbyRadioOff == true) {
+                RootRadioPower.radiosBackOn(this@DiPlaySessionService)?.let { radios ->
+                    log("待机守卫：没有收到唤醒请求，${radios} 又自己打开了，重新关闭")
+                    RootRadioPower.enterStandby(this@DiPlaySessionService)
+                }
+            }
+            if (!destroyed && standby) main.postDelayed(this, STANDBY_GUARD_INTERVAL_MILLIS)
+        }
+    }
+
+    private fun log(message: String) {
+        Log.i(TAG, message)
+        DiagnosticLogSink.append(message)
+    }
+
+    private fun scheduleStandbyGuard() {
+        main.removeCallbacks(standbyGuard)
+        if (standby && !destroyed) main.postDelayed(standbyGuard, STANDBY_GUARD_INTERVAL_MILLIS)
+    }
+
+    private fun cancelStandbyGuard() {
+        main.removeCallbacks(standbyGuard)
+    }
 
     private val wakeAndPowerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -229,6 +263,7 @@ class DiPlaySessionService : Service() {
             {
                 if (destroyed || activationBlocked || token != powerLossStandbyToken) return@postDelayed
                 if (!CarPlayBackgroundSession.powerDisconnected) return@postDelayed
+                log("随车断电已持续 ${POWER_LOSS_STANDBY_DELAY_MILLIS / 1000} 秒，进入待机省电")
                 CarPlayBackgroundSession.requestStandby("随车断电，已进入省电待机")
                 enterStandby()
             },
@@ -252,11 +287,22 @@ class DiPlaySessionService : Service() {
             radioPowerOffVerified = verified
             main.post { if (!destroyed) updateNotification() }
         }
+        scheduleStandbyGuard()
         updateNotification()
     }
 
     internal fun wakeFromStandby(trigger: String) {
         if (destroyed || activationBlocked) return
+        val unplugged = runCatching { CarPlayBackgroundSession.isUnpluggedOnBattery(this) }
+            .getOrDefault(false)
+        // On battery the radios must stay off: a Bluetooth reconnection or a stray service start
+        // is not a reason to wake the whole stack. Only car power or an explicit tap may.
+        if (unplugged && trigger != TRIGGER_POWER && trigger != TRIGGER_MANUAL) {
+            log("唤醒被忽略（$trigger）：手机在电池供电，继续待机省电")
+            return
+        }
+        log("唤醒（$trigger，电池供电=$unplugged）")
+        cancelStandbyGuard()
         if (runCatching { DiPlayBootstrap.ensure(this) }.isFailure) return
         activateWebAndLocks()
         if (!CarPlayBackgroundSession.wake(trigger) &&
@@ -386,6 +432,7 @@ class DiPlaySessionService : Service() {
 
     override fun onDestroy() {
         destroyed = true
+        cancelStandbyGuard()
         unregisterWakeAndPowerReceiver()
         sessionSubscription?.close()
         media.close()
@@ -398,6 +445,10 @@ class DiPlaySessionService : Service() {
         const val ACTION_STOP = "com.shihab.diplay.DISCONNECT"
         const val ACTION_STANDBY = "com.shilapi.xcertplay.STANDBY"
         const val ACTION_WAKE = "com.shilapi.xcertplay.WAKE"
+        private const val TAG = "WheelPlayStandby"
+        private const val STANDBY_GUARD_INTERVAL_MILLIS = 30_000L
+        private const val TRIGGER_POWER = "随车通电"
+        private const val TRIGGER_MANUAL = "手动唤醒"
         private const val ACTION_MEDIA = "com.shilapi.xcertplay.MEDIA_COMMAND"
         private const val EXTRA_COMMAND = "command"
         private const val EXTRA_GENERATION = "generation"
