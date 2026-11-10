@@ -118,7 +118,8 @@ class PowerSaveStandbyTest {
         assertNull(ReflectionHelpers.getField<Any?>(service, "wifiLock"))
 
         app.sendBroadcast(Intent(Intent.ACTION_POWER_CONNECTED))
-        shadowOf(Looper.getMainLooper()).idle()
+        // The rail has to stay up through the debounce; a one-second pulse must not wake anything.
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(6))
         assertTrue(WebSession.running)
         assertNotNull(ReflectionHelpers.getField<Any?>(service, "wakeLock"))
         assertNotNull(ReflectionHelpers.getField<Any?>(service, "wifiLock"))
@@ -217,10 +218,44 @@ class PowerSaveStandbyTest {
 
         // Reconnecting car power wakes everything back up
         app.sendBroadcast(Intent(Intent.ACTION_POWER_CONNECTED))
-        shadowOf(Looper.getMainLooper()).idle()
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(6))
         assertFalse(CarPlayBackgroundSession.powerDisconnected)
         assertTrue(WebSession.running)
         assertEquals("随车通电", wakeTrigger)
+        controller.destroy()
+    }
+
+    @Test
+    fun aPowerBlipShorterThanTheDebounceDoesNotWakeTheRadios() {
+        val controller = Robolectric.buildService(DiPlaySessionService::class.java).create()
+        val service = controller.get()
+        service.onStartCommand(Intent(app, DiPlaySessionService::class.java), 0, 1)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        var wakeTrigger: String? = null
+        CarPlayBackgroundSession.markStandby(
+            owner = this,
+            wake = { trigger -> wakeTrigger = trigger },
+            standby = {},
+            stop = { it() },
+        )
+        service.onStartCommand(
+            Intent(app, DiPlaySessionService::class.java)
+                .setAction(DiPlaySessionService.ACTION_STANDBY),
+            0,
+            2,
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(WebSession.running)
+
+        // A car charger or a half-seated plug pulses and is gone again: no wake, no radios.
+        app.sendBroadcast(Intent(Intent.ACTION_POWER_CONNECTED))
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        app.sendBroadcast(Intent(Intent.ACTION_POWER_DISCONNECTED))
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(10))
+
+        assertFalse(WebSession.running)
+        assertNull(wakeTrigger)
         controller.destroy()
     }
 

@@ -9,6 +9,10 @@ import com.shilapi.xcertplay.media.NowPlayingState
 import android.annotation.SuppressLint
 import android.os.PowerManager
 import android.util.Log
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -28,6 +32,7 @@ import android.graphics.drawable.Icon
 import android.media.session.MediaSession
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -46,6 +51,8 @@ class DiPlaySessionService : Service() {
     private var standby = false
     /** Guards the delayed power-loss standby so a reconnect cancels it. */
     private var powerLossStandbyToken = 0
+    /** Guards the delayed power-on so a power dip cannot wake the radios. */
+    private var powerWakeToken = 0
     @Volatile private var radioPowerOffVerified: Boolean? = null
     private var receiverRegistered = false
     private var currentState = NowPlayingState()
@@ -74,6 +81,25 @@ class DiPlaySessionService : Service() {
     private fun log(message: String) {
         Log.i(TAG, message)
         DiagnosticLogSink.append(message)
+        appendStandbyLog(message)
+    }
+
+    /**
+     * Standby and wake events happen while the CarPlay host UI is closed, so the in-app report has
+     * no writer then. They get their own small file so a later power-loss investigation has the
+     * facts even when nothing else was running.
+     */
+    private fun appendStandbyLog(message: String) {
+        runCatching {
+            val directory = File(filesDir, "logs").apply { mkdirs() }
+            val file = File(directory, "standby.log")
+            if (file.length() > STANDBY_LOG_MAX_BYTES) {
+                val kept = file.readLines().takeLast(STANDBY_LOG_KEEP_LINES)
+                file.writeText(kept.joinToString("\n", postfix = "\n"))
+            }
+            val line = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date()) + "  " + message
+            file.appendText(line + "\n")
+        }
     }
 
     private fun scheduleStandbyGuard() {
@@ -90,15 +116,18 @@ class DiPlaySessionService : Service() {
             if (destroyed || activationBlocked) return
             when (intent.action) {
                 Intent.ACTION_POWER_CONNECTED -> {
+                    log("收到通电广播：随车供电已恢复（${batterySummary(context)}）")
                     CarPlayBackgroundSession.powerDisconnected = false
                     // A power dip that comes back before the delay cancels the standby entirely.
                     cancelPendingPowerLossStandby()
                     if (standby || !WebSession.running || !CarPlayBackgroundSession.active) {
-                        wakeFromStandby("随车通电")
+                        schedulePowerWake()
                     }
                 }
                 Intent.ACTION_POWER_DISCONNECTED -> {
+                    log("收到断电广播：随车供电已断开（${batterySummary(context)}）")
                     CarPlayBackgroundSession.powerDisconnected = true
+                    cancelPendingPowerWake()
                     schedulePowerLossStandby()
                 }
                 BluetoothDevice.ACTION_ACL_CONNECTED -> {
@@ -119,8 +148,12 @@ class DiPlaySessionService : Service() {
                     }
                 }
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
-                    if (CarPlayBackgroundSession.isUnpluggedOnBattery(context)) return
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)
+                    log("收到蓝牙状态变化：state=$state（待机=$standby）")
+                    if (CarPlayBackgroundSession.isUnpluggedOnBattery(context)) {
+                        log("蓝牙事件被忽略：手机在电池供电")
+                        return
+                    }
                     if (state == BluetoothAdapter.STATE_ON &&
                         (standby || CarPlayBackgroundSession.standby) &&
                         !CarPlayBackgroundSession.active
@@ -273,6 +306,57 @@ class DiPlaySessionService : Service() {
 
     private fun cancelPendingPowerLossStandby() {
         powerLossStandbyToken += 1
+    }
+
+    /**
+     * Car chargers, USB hubs and a half-seated plug all produce "power connected" pulses that last
+     * a fraction of a second. Waking on those brought Wi-Fi, the hotspot and Bluetooth back up a
+     * few seconds after a power-loss standby, with nobody near the car. Wait for the rail to stay
+     * up, then verify it once more before touching the radios.
+     */
+    /**
+     * What the battery service actually reports. A "power connected" broadcast with
+     * `plugged=none` means the ROM fired a phantom event; `plugged=usb` means the connector
+     * really saw a charger (a loose or dirty port is enough).
+     */
+    private fun batterySummary(context: Context): String = runCatching {
+        val status = context.applicationContext.registerReceiver(
+            null,
+            IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+        ) ?: return@runCatching "电池状态未知"
+        val plugged = when (status.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)) {
+            0 -> "none"
+            BatteryManager.BATTERY_PLUGGED_AC -> "ac"
+            BatteryManager.BATTERY_PLUGGED_USB -> "usb"
+            BatteryManager.BATTERY_PLUGGED_WIRELESS -> "wireless"
+            else -> "unknown(${status.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)})"
+        }
+        val level = status.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val charging = status.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ==
+            BatteryManager.BATTERY_STATUS_CHARGING
+        "plugged=$plugged 充电中=$charging 电量=$level%"
+    }.getOrDefault("电池状态读取失败")
+
+    private fun schedulePowerWake() {
+        val token = ++powerWakeToken
+        main.postDelayed(
+            {
+                if (destroyed || activationBlocked || token != powerWakeToken) return@postDelayed
+                val unplugged = runCatching {
+                    CarPlayBackgroundSession.isUnpluggedOnBattery(this)
+                }.getOrDefault(false)
+                if (unplugged) {
+                    log("通电只持续了不到 ${POWER_WAKE_DEBOUNCE_MILLIS / 1000} 秒，继续待机省电")
+                    return@postDelayed
+                }
+                wakeFromStandby(TRIGGER_POWER)
+            },
+            POWER_WAKE_DEBOUNCE_MILLIS,
+        )
+    }
+
+    private fun cancelPendingPowerWake() {
+        powerWakeToken += 1
     }
 
     private fun enterStandby() {
@@ -447,6 +531,9 @@ class DiPlaySessionService : Service() {
         const val ACTION_WAKE = "com.shilapi.xcertplay.WAKE"
         private const val TAG = "WheelPlayStandby"
         private const val STANDBY_GUARD_INTERVAL_MILLIS = 30_000L
+        private const val POWER_WAKE_DEBOUNCE_MILLIS = 5_000L
+        private const val STANDBY_LOG_MAX_BYTES = 256L * 1024L
+        private const val STANDBY_LOG_KEEP_LINES = 1_500
         private const val TRIGGER_POWER = "随车通电"
         private const val TRIGGER_MANUAL = "手动唤醒"
         private const val ACTION_MEDIA = "com.shilapi.xcertplay.MEDIA_COMMAND"
