@@ -85,6 +85,7 @@ class PowerSaveStandbyTest {
     fun tearDown() {
         WebSession.stop()
         CarPlayBackgroundSession.clear()
+        DiPlaySessionService.resetStandbyLatch()
         RootRadioPower.suspendedByStandby = false
         RootRadioPower.lastStandbyRadioOff = null
     }
@@ -223,6 +224,36 @@ class PowerSaveStandbyTest {
         assertTrue(WebSession.running)
         assertEquals("随车通电", wakeTrigger)
         controller.destroy()
+    }
+
+    @Test
+    fun aBackgroundServiceStartDoesNotWakeTheRadiosAfterAPowerLossStandby() {
+        // Field log: a normal service start 21 s after the standby brought Wi-Fi and Bluetooth
+        // back up. Robolectric reports the phone as plugged, so only the latch can stop it.
+        val controller = Robolectric.buildService(DiPlaySessionService::class.java).create()
+        val service = controller.get()
+        service.onStartCommand(Intent(app, DiPlaySessionService::class.java), 0, 1)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(WebSession.running)
+
+        CarPlayBackgroundSession.markStandby(
+            owner = this,
+            wake = {},
+            standby = {},
+            stop = { it() },
+        )
+        app.sendBroadcast(Intent(Intent.ACTION_POWER_DISCONNECTED))
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(21))
+        assertFalse(WebSession.running)
+
+        CarPlayBackgroundSession.powerDisconnected = false
+        val restarted = Robolectric.buildService(DiPlaySessionService::class.java).create().get()
+        restarted.onStartCommand(Intent(app, DiPlaySessionService::class.java), 0, 3)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFalse("a background start must not wake the radios", WebSession.running)
+        controller.destroy()
+        restarted.stopSelf()
     }
 
     @Test

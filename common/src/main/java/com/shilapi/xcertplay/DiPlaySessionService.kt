@@ -53,6 +53,7 @@ class DiPlaySessionService : Service() {
     private var powerLossStandbyToken = 0
     /** Guards the delayed power-on so a power dip cannot wake the radios. */
     private var powerWakeToken = 0
+
     @Volatile private var radioPowerOffVerified: Boolean? = null
     private var receiverRegistered = false
     private var currentState = NowPlayingState()
@@ -191,6 +192,7 @@ class DiPlaySessionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             standby = false
+            powerLossLatch = false
             media.close()
             runWebAction { WebSession.stop() }
             CarPlayBackgroundSession.stop()
@@ -237,11 +239,16 @@ class DiPlaySessionService : Service() {
             wakeFromStandby("手动唤醒")
             return START_NOT_STICKY
         }
-        if (CarPlayBackgroundSession.isUnpluggedOnBattery(this)) {
+        if (powerLossLatch || CarPlayBackgroundSession.isUnpluggedOnBattery(this)) {
+            log(
+                "服务被启动（action=${intent?.action}），仍在电池供电：保持待机" +
+                    "（${batterySummary(this)}）",
+            )
             CarPlayBackgroundSession.requestStandby("未检测到随车供电，已进入省电待机")
             enterStandby()
             return START_NOT_STICKY
         }
+        log("服务被启动（action=${intent?.action}）：${batterySummary(this)}，开始工作")
         activateWebAndLocks()
         return START_NOT_STICKY
     }
@@ -362,6 +369,7 @@ class DiPlaySessionService : Service() {
     private fun enterStandby() {
         if (destroyed || activationBlocked) return
         standby = true
+        powerLossLatch = true
         CarPlayBackgroundSession.standby = true
         CarPlayBackgroundSession.active = false
         runWebAction { WebSession.stop() }
@@ -386,6 +394,7 @@ class DiPlaySessionService : Service() {
             return
         }
         log("唤醒（$trigger，电池供电=$unplugged）")
+        powerLossLatch = false
         cancelStandbyGuard()
         if (runCatching { DiPlayBootstrap.ensure(this) }.isFailure) return
         activateWebAndLocks()
@@ -517,6 +526,7 @@ class DiPlaySessionService : Service() {
     override fun onDestroy() {
         destroyed = true
         cancelStandbyGuard()
+        resetStandbyLatch()
         unregisterWakeAndPowerReceiver()
         sessionSubscription?.close()
         media.close()
@@ -531,6 +541,18 @@ class DiPlaySessionService : Service() {
         const val ACTION_WAKE = "com.shilapi.xcertplay.WAKE"
         private const val TAG = "WheelPlayStandby"
         private const val STANDBY_GUARD_INTERVAL_MILLIS = 30_000L
+        /**
+         * Set once a power-loss standby has run, and shared by every instance: while it is set,
+         * nothing but car power coming back or an explicit tap may leave standby. A background
+         * service start, a Bluetooth event or a ROM reboot of the radio is not a wake request.
+         */
+        @Volatile
+        private var powerLossLatch = false
+
+        /** The latch must not outlive the service the user stopped. */
+        internal fun resetStandbyLatch() {
+            powerLossLatch = false
+        }
         private const val POWER_WAKE_DEBOUNCE_MILLIS = 5_000L
         private const val STANDBY_LOG_MAX_BYTES = 256L * 1024L
         private const val STANDBY_LOG_KEEP_LINES = 1_500
