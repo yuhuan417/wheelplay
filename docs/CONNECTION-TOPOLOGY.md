@@ -122,7 +122,12 @@ iAP2 `0x5703` / `0x4301` 下发给 iPhone 的 `channel` 也会过期。
 - `wakeGeneration` 只由 `wakeFromStandby` 递增，待机用它判断"是不是真的有人唤醒"；
 - `cancelEpoch` 由两者递增，只用来中止在飞的工作（唤醒不再继续等关联、不再去建热点）。
 
-另外待机守卫改由 `AlarmManager.setExactAndAllowWhileIdle` 每分钟唤醒一次 CPU：灭屏且不持锁时主线程
+蓝牙和 Wi-Fi/热点同一个规则：断电待机期间必须保持关闭。MIUI 会在关掉约 24 秒后把它弹回来，所以守卫
+每 30 秒检查一次；如果只有蓝牙自己回来了，就用进程内的 `BluetoothAdapter.disable()` 立刻关掉，不跑
+root 脚本（`待机守卫：蓝牙又自己打开了，已再次关闭（Wi-Fi 和热点未受影响）`）；只有 Wi-Fi 或热点回来
+才执行整套 root 拆除。
+
+另外待机守卫改由 `AlarmManager.setExactAndAllowWhileIdle` 每 30 秒唤醒一次 CPU：灭屏且不持锁时主线程
 定时器会被挂起，之前那个 30 秒 handler 在整段待机里一次都没跑过。
 
 还有一道"断电锁"（`DiPlaySessionService.powerLossLatch`，全进程共享）：一旦因随车断电进入过待机，

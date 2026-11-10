@@ -431,6 +431,71 @@ class PowerSaveStandbyTest {
     }
 
     @Test
+    fun standbyGuardTurnsBluetoothOffAgainWhenOnlyItRebounds() {
+        // MIUI restores Bluetooth about 24 s after standby turns it off. Bluetooth has an
+        // in-process API, so it must go back down without waiting for a root teardown.
+        val originalAvailable = RootRadioPower.rootAvailable
+        val originalExecute = RootRadioPower.executeRootScript
+        val originalVerify = RootRadioPower.verifyRadioOff
+        val originalBluetoothEnabled = RootRadioPower.bluetoothEnabled
+        val originalSetBluetooth = RootRadioPower.setBluetoothEnabled
+        val standbyScripts = java.util.concurrent.atomic.AtomicInteger()
+        val bluetoothDisabled = java.util.concurrent.atomic.AtomicInteger()
+        try {
+            RootRadioPower.rootAvailable = { true }
+            RootRadioPower.verifyRadioOff = { true }
+            RootRadioPower.bluetoothEnabled = { false }
+            RootRadioPower.setBluetoothEnabled = { _, _ -> }
+            RootRadioPower.executeRootScript = { script ->
+                if (script.contains("RootHotspotMain stop")) standbyScripts.incrementAndGet()
+                true
+            }
+            @Suppress("DEPRECATION")
+            app.getSystemService(android.net.wifi.WifiManager::class.java).isWifiEnabled = false
+
+            val controller = Robolectric.buildService(DiPlaySessionService::class.java).create()
+            val service = controller.get()
+            service.onStartCommand(Intent(app, DiPlaySessionService::class.java), 0, 1)
+            shadowOf(Looper.getMainLooper()).idle()
+            CarPlayBackgroundSession.markStandby(owner = this, wake = {}, standby = {}, stop = { it() })
+            service.onStartCommand(
+                Intent(app, DiPlaySessionService::class.java)
+                    .setAction(DiPlaySessionService.ACTION_STANDBY),
+                0,
+                2,
+            )
+            val deadline = System.currentTimeMillis() + 5_000
+            while (RootRadioPower.lastStandbyRadioOff != true && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20)
+            }
+            assertEquals(true, RootRadioPower.lastStandbyRadioOff)
+            val teardowns = standbyScripts.get()
+
+            RootRadioPower.bluetoothEnabled = { true }
+            RootRadioPower.setBluetoothEnabled = { _, enabled -> if (!enabled) bluetoothDisabled.incrementAndGet() }
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(31))
+
+            assertTrue("the guard has to switch Bluetooth off again", bluetoothDisabled.get() >= 1)
+            assertEquals(
+                "Bluetooth alone must not trigger the root teardown",
+                teardowns,
+                standbyScripts.get(),
+            )
+            controller.destroy()
+        } finally {
+            RootRadioPower.rootAvailable = originalAvailable
+            RootRadioPower.executeRootScript = originalExecute
+            RootRadioPower.verifyRadioOff = originalVerify
+            RootRadioPower.bluetoothEnabled = originalBluetoothEnabled
+            RootRadioPower.setBluetoothEnabled = originalSetBluetooth
+            RootRadioPower.suspendedByStandby = false
+            RootRadioPower.lastStandbyRadioOff = null
+            @Suppress("DEPRECATION")
+            app.getSystemService(android.net.wifi.WifiManager::class.java).isWifiEnabled = true
+        }
+    }
+
+    @Test
     fun standbyGuardCutsTheRadiosAgainWhenSomethingTurnsThemBackOn() {
         val originalAvailable = RootRadioPower.rootAvailable
         val originalExecute = RootRadioPower.executeRootScript
@@ -472,8 +537,11 @@ class PowerSaveStandbyTest {
             assertEquals(true, RootRadioPower.lastStandbyRadioOff)
             assertEquals(1, standbyScripts.get())
 
-            // Something outside the app turns a radio back on while the phone stays unplugged.
+            // Something outside the app turns Wi-Fi and Bluetooth back on while the phone stays
+            // unplugged. Wi-Fi needs the root teardown, so the guard has to run it again.
             RootRadioPower.bluetoothEnabled = { true }
+            @Suppress("DEPRECATION")
+            app.getSystemService(android.net.wifi.WifiManager::class.java).isWifiEnabled = true
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(31))
             val guardDeadline = System.currentTimeMillis() + 5_000
             while (standbyScripts.get() < 2 && System.currentTimeMillis() < guardDeadline) {

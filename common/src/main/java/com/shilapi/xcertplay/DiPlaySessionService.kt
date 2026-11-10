@@ -75,12 +75,22 @@ class DiPlaySessionService : Service() {
 
     private fun runStandbyGuardCheck() {
         if (destroyed || activationBlocked || !standby) return
-        RootRadioPower.radiosBackOn(this)?.let { radios ->
-            log("待机守卫：没有收到唤醒请求，$radios 又自己打开了，重新关闭")
-            // Drop the "already off" memo, otherwise the teardown would be skipped as a duplicate.
-            RootRadioPower.lastStandbyRadioOff = null
-            RootRadioPower.enterStandby(this)
+        val radios = RootRadioPower.radiosBackOn(this)
+        if (!radios.any) return
+        if (radios.bluetoothOnly) {
+            // MIUI restores Bluetooth about 24 s after it is turned off. Bluetooth has an
+            // in-process API, so it goes down again immediately instead of waiting for a root
+            // round trip - the same rule as Wi-Fi and the hotspot: standby means the radio is off.
+            runCatching { RootRadioPower.setBluetoothEnabled(this, false) }
+                .onFailure { log("待机守卫：关闭蓝牙失败（${it.message}）") }
+            RootRadioPower.bluetoothRebound()
+            log("待机守卫：蓝牙又自己打开了，已再次关闭（Wi-Fi 和热点未受影响）")
+            return
         }
+        log("待机守卫：没有收到唤醒请求，$radios 又自己打开了，重新关闭")
+        // Drop the "already off" memo, otherwise the teardown would be skipped as a duplicate.
+        RootRadioPower.lastStandbyRadioOff = null
+        RootRadioPower.enterStandby(this)
     }
 
     private fun log(message: String) {
@@ -594,7 +604,7 @@ class DiPlaySessionService : Service() {
         private const val POWER_WAKE_DEBOUNCE_MILLIS = 5_000L
         internal const val ACTION_STANDBY_GUARD = "com.shilapi.xcertplay.STANDBY_GUARD"
         private const val STANDBY_GUARD_REQUEST_CODE = 3
-        private const val STANDBY_GUARD_ALARM_MILLIS = 60_000L
+        private const val STANDBY_GUARD_ALARM_MILLIS = 30_000L
         private const val STANDBY_LOG_MAX_BYTES = 256L * 1024L
         private const val STANDBY_LOG_KEEP_LINES = 1_500
         private const val TRIGGER_POWER = "随车通电"

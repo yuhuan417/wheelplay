@@ -59,6 +59,14 @@ internal object RootRadioPower {
     @Volatile
     internal var suspendedByStandby = false
 
+    /** Counts Bluetooth re-enables observed while standby, for the diagnostic report. */
+    @Volatile
+    internal var bluetoothRebounds = 0
+
+    internal fun bluetoothRebound() {
+        bluetoothRebounds += 1
+    }
+
     /** Last verified outcome of the standby teardown; null until a standby request completes. */
     @Volatile
     internal var lastStandbyRadioOff: Boolean? = null
@@ -204,19 +212,32 @@ internal object RootRadioPower {
         return false
     }
 
+    /** Which radios are on although standby turned them off. */
+    internal class RadiosBackOn(
+        val wifi: Boolean,
+        val hotspot: Boolean,
+        val bluetooth: Boolean,
+    ) {
+        val any: Boolean get() = wifi || hotspot || bluetooth
+
+        /** Bluetooth alone can be switched off in-process; Wi-Fi needs the root teardown. */
+        val bluetoothOnly: Boolean get() = bluetooth && !wifi && !hotspot
+
+        override fun toString(): String = "wifi=$wifi hotspot=$hotspot bluetooth=$bluetooth"
+    }
+
     /**
-     * Names the radios that are on although standby turned them off, or null when everything
-     * stayed off. Used by the standby guard to detect a wake nobody asked for.
+     * Reports the radios that are on although standby turned them off. Used by the standby guard
+     * to detect a wake nobody asked for, and to put Bluetooth back down when the ROM restores it.
      */
-    internal fun radiosBackOn(context: Context): String? {
+    internal fun radiosBackOn(context: Context): RadiosBackOn {
         val app = context.applicationContext
         val wifi = runCatching {
             app.getSystemService(WifiManager::class.java)?.isWifiEnabled == true
         }.getOrDefault(false)
         val hotspot = runCatching { CarHotspotStatus.isEnabled(app) }.getOrNull() == true
         val bluetooth = runCatching { bluetoothEnabled(app) }.getOrDefault(false)
-        if (!wifi && !hotspot && !bluetooth) return null
-        return "wifi=$wifi hotspot=$hotspot bluetooth=$bluetooth"
+        return RadiosBackOn(wifi, hotspot, bluetooth)
     }
 
     private fun defaultVerifyRadioOff(context: Context): Boolean {
