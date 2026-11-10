@@ -114,6 +114,17 @@ iAP2 `0x5703` / `0x4301` 下发给 iPhone 的 `channel` 也会过期。
 手机在电池供电时，只有「随车通电」和「立即唤醒」能真的离开待机；`iPhone 蓝牙已连接` 之类的
 蓝牙事件会被忽略并记录（`唤醒被忽略（…）：手机在电池供电，继续待机省电`）。
 
+待机被自己"恢复"过：`RootRadioPower.enterStandby()` 原来用 `wakeGeneration` 同时表示"有人唤醒"和"又收到
+一次待机请求"。CarPlay 界面在每次待机拆除结束后会再发一次 `ACTION_STANDBY`，那次重复请求把计数加一，
+正在跑的关射频流程就把它误判成"设备已唤醒"，于是执行 `restoring radios` 把 Wi-Fi、热点和蓝牙**重新打开**
+——真机日志里 15:32:46 进待机、15:33:07 就自己亮了，用户根本还没插线。现在拆成两个计数：
+
+- `wakeGeneration` 只由 `wakeFromStandby` 递增，待机用它判断"是不是真的有人唤醒"；
+- `cancelEpoch` 由两者递增，只用来中止在飞的工作（唤醒不再继续等关联、不再去建热点）。
+
+另外待机守卫改由 `AlarmManager.setExactAndAllowWhileIdle` 每分钟唤醒一次 CPU：灭屏且不持锁时主线程
+定时器会被挂起，之前那个 30 秒 handler 在整段待机里一次都没跑过。
+
 还有一道"断电锁"（`DiPlaySessionService.powerLossLatch`，全进程共享）：一旦因随车断电进入过待机，
 只有「随车通电」或「立即唤醒」能解锁。后台被重新拉起（`startForegroundService`、通知、浏览器页面）
 一律不唤醒，只把待机重新执行一遍并记录：

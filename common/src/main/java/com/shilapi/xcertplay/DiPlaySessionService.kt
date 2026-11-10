@@ -15,6 +15,7 @@ import java.util.Date
 import java.util.Locale
 import android.Manifest
 import android.app.Notification
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -67,15 +68,18 @@ class DiPlaySessionService : Service() {
      */
     private val standbyGuard = object : Runnable {
         override fun run() {
-            if (destroyed || activationBlocked || !standby) return
-            // Only meaningful once a standby teardown actually verified the radios are off.
-            if (RootRadioPower.lastStandbyRadioOff == true) {
-                RootRadioPower.radiosBackOn(this@DiPlaySessionService)?.let { radios ->
-                    log("待机守卫：没有收到唤醒请求，${radios} 又自己打开了，重新关闭")
-                    RootRadioPower.enterStandby(this@DiPlaySessionService)
-                }
-            }
+            runStandbyGuardCheck()
             if (!destroyed && standby) main.postDelayed(this, STANDBY_GUARD_INTERVAL_MILLIS)
+        }
+    }
+
+    private fun runStandbyGuardCheck() {
+        if (destroyed || activationBlocked || !standby) return
+        RootRadioPower.radiosBackOn(this)?.let { radios ->
+            log("待机守卫：没有收到唤醒请求，$radios 又自己打开了，重新关闭")
+            // Drop the "already off" memo, otherwise the teardown would be skipped as a duplicate.
+            RootRadioPower.lastStandbyRadioOff = null
+            RootRadioPower.enterStandby(this)
         }
     }
 
@@ -105,11 +109,39 @@ class DiPlaySessionService : Service() {
 
     private fun scheduleStandbyGuard() {
         main.removeCallbacks(standbyGuard)
-        if (standby && !destroyed) main.postDelayed(standbyGuard, STANDBY_GUARD_INTERVAL_MILLIS)
+        if (!standby || destroyed) return
+        main.postDelayed(standbyGuard, STANDBY_GUARD_INTERVAL_MILLIS)
+        // With the screen off and no wake lock the CPU suspends, so a plain handler timer can be
+        // deferred for the whole standby. The alarm wakes the CPU for the check (deep doze still
+        // rate-limits it, which is the right trade-off once the car has been off for a long time).
+        runCatching {
+            val alarm = getSystemService(AlarmManager::class.java) ?: return@runCatching
+            val intent = Intent(this, DiPlaySessionService::class.java)
+                .setAction(ACTION_STANDBY_GUARD)
+            val pending = PendingIntent.getService(
+                this,
+                STANDBY_GUARD_REQUEST_CODE,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val at = System.currentTimeMillis() + STANDBY_GUARD_ALARM_MILLIS
+            alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
+        }
     }
 
     private fun cancelStandbyGuard() {
         main.removeCallbacks(standbyGuard)
+        runCatching {
+            val alarm = getSystemService(AlarmManager::class.java) ?: return@runCatching
+            alarm.cancel(
+                PendingIntent.getService(
+                    this,
+                    STANDBY_GUARD_REQUEST_CODE,
+                    Intent(this, DiPlaySessionService::class.java).setAction(ACTION_STANDBY_GUARD),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+        }
     }
 
     private val wakeAndPowerReceiver = object : BroadcastReceiver() {
@@ -230,7 +262,13 @@ class DiPlaySessionService : Service() {
             }
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_STANDBY_GUARD) {
+            runStandbyGuardCheck()
+            scheduleStandbyGuard()
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STANDBY) {
+            log("收到待机请求（幂等，不会当成唤醒）")
             enterStandby()
             return START_NOT_STICKY
         }
@@ -554,6 +592,9 @@ class DiPlaySessionService : Service() {
             powerLossLatch = false
         }
         private const val POWER_WAKE_DEBOUNCE_MILLIS = 5_000L
+        internal const val ACTION_STANDBY_GUARD = "com.shilapi.xcertplay.STANDBY_GUARD"
+        private const val STANDBY_GUARD_REQUEST_CODE = 3
+        private const val STANDBY_GUARD_ALARM_MILLIS = 60_000L
         private const val STANDBY_LOG_MAX_BYTES = 256L * 1024L
         private const val STANDBY_LOG_KEEP_LINES = 1_500
         private const val TRIGGER_POWER = "随车通电"

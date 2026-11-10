@@ -67,8 +67,20 @@ internal object RootRadioPower {
     @Volatile
     private var lastStandbyRequestAt = 0L
 
-    /** Aborts the association wait (and the deferred hotspot start) when power is cut again. */
+    /**
+     * Incremented only by a wake request. A standby uses it to notice that the device woke while
+     * the (slow) root power-off script was running.
+     */
     private val wakeGeneration = AtomicInteger(0)
+
+    /**
+     * Incremented by both standby and wake. Every in-flight worker compares it to abort: a wake
+     * must not keep waiting for an association, and must not start the hotspot, after a new
+     * standby has taken over. Keeping this separate matters - bumping [wakeGeneration] from
+     * [enterStandby] made a duplicate standby request look like a wake, and the teardown then
+     * "restored" the radios ~21 s after cutting them.
+     */
+    private val cancelEpoch = AtomicInteger(0)
 
     /**
      * Overridable in unit tests so Robolectric tests never spawn real `su` processes.
@@ -107,13 +119,18 @@ internal object RootRadioPower {
     fun enterStandby(context: Context, onComplete: ((Boolean) -> Unit)? = null) {
         // A wake may arrive while the (slow) root power-off script is still running; the captured
         // generation lets the worker notice and step aside instead of tearing down the radios of a
-        // device that has already woken up.
-        val generation = wakeGeneration.incrementAndGet()
+        // device that has already woken up. Only a wake bumps it, never another standby.
+        val wakeGenerationAtEntry = wakeGeneration.get()
+        cancelEpoch.incrementAndGet()
         val appContext = context.applicationContext
         val bluetoothWasEnabled = runCatching { bluetoothEnabled(appContext) }.getOrDefault(false)
         val duplicate = synchronized(this) {
             val now = SystemClock.elapsedRealtime()
-            val duplicate = suspendedByStandby && now - lastStandbyRequestAt < STANDBY_DEBOUNCE_MILLIS
+            // Cheap duplicate: asked again within the debounce, or the radios were already verified
+            // off (the CarPlay teardown asks for standby a second time after every teardown and
+            // there is nothing left to do).
+            val duplicate = suspendedByStandby &&
+                (now - lastStandbyRequestAt < STANDBY_DEBOUNCE_MILLIS || lastStandbyRadioOff == true)
             lastStandbyRequestAt = now
             suspendedByStandby = true
             duplicate
@@ -126,7 +143,7 @@ internal object RootRadioPower {
         worker.execute {
             var radioOff = false
             try {
-                if (wakeGeneration.get() != generation) {
+                if (wakeGeneration.get() != wakeGenerationAtEntry) {
                     log("Standby aborted: the device woke before the radio power-off started")
                     return@execute
                 }
@@ -147,7 +164,7 @@ internal object RootRadioPower {
                         "exit 0",
                 )
                 runCatching { BinderRadioControl.stopHotspotAndWifi(appContext, packageName) }
-                if (wakeGeneration.get() != generation) {
+                if (wakeGeneration.get() != wakeGenerationAtEntry) {
                     log("Standby aborted after the framework calls: the device woke")
                     return@execute
                 }
@@ -165,7 +182,7 @@ internal object RootRadioPower {
                 log(
                     "Standby radio power-off executed (script=$ok, radioOff=$radioOff)",
                 )
-                if (wakeGeneration.get() != generation) {
+                if (wakeGeneration.get() != wakeGenerationAtEntry) {
                     // The power-off landed after the wake; put the radios back.
                     log("Standby raced with a wake; restoring radios")
                     wakeFromStandby(appContext)
@@ -217,7 +234,8 @@ internal object RootRadioPower {
     }
 
     fun wakeFromStandby(context: Context, onComplete: (() -> Unit)? = null) {
-        val generation = wakeGeneration.incrementAndGet()
+        wakeGeneration.incrementAndGet()
+        val generation = cancelEpoch.incrementAndGet()
         val appContext = context.applicationContext
         val wasSuspended = suspendedByStandby
         suspendedByStandby = false
@@ -267,7 +285,7 @@ internal object RootRadioPower {
                 }
                 val associated = awaitWifiAssociation(appContext, generation)
                 log("Wake Wi-Fi association ready=$associated (wifiScript=$wifiScriptOk)")
-                if (generation != wakeGeneration.get()) {
+                if (generation != cancelEpoch.get()) {
                     log("Wake aborted before starting the hotspot")
                     return@execute
                 }
@@ -314,7 +332,7 @@ internal object RootRadioPower {
         val timeoutMillis = associationTimeoutMillis.coerceAtLeast(0)
         var lastLog = 0L
         while (true) {
-            if (generation != wakeGeneration.get()) return false
+            if (generation != cancelEpoch.get()) return false
             if (runCatching { wifiAssociated(context) }.getOrDefault(false)) return true
             val elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000
             if (elapsedMillis >= timeoutMillis) return false

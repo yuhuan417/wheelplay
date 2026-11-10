@@ -385,6 +385,52 @@ class PowerSaveStandbyTest {
     }
 
     @Test
+    fun aSecondStandbyRequestIsNotMistakenForAWake() {
+        // Field log: the CarPlay teardown asks for standby again while the (slow) power-off script
+        // is still running; that used to bump the wake generation, so the teardown "restored" the
+        // radios ~21 s after cutting them and Wi-Fi, the hotspot and Bluetooth came back by
+        // themselves.
+        val originalAvailable = RootRadioPower.rootAvailable
+        val originalExecute = RootRadioPower.executeRootScript
+        val originalVerify = RootRadioPower.verifyRadioOff
+        val originalBluetoothEnabled = RootRadioPower.bluetoothEnabled
+        val originalSetBluetooth = RootRadioPower.setBluetoothEnabled
+        val wakeScripts = java.util.concurrent.atomic.AtomicInteger()
+        val standbyScripts = java.util.concurrent.atomic.AtomicInteger()
+        try {
+            RootRadioPower.rootAvailable = { true }
+            RootRadioPower.verifyRadioOff = { true }
+            RootRadioPower.bluetoothEnabled = { false }
+            RootRadioPower.setBluetoothEnabled = { _, _ -> }
+            RootRadioPower.executeRootScript = { script ->
+                if (script.contains("set-wifi-enabled enabled")) wakeScripts.incrementAndGet()
+                if (script.contains("RootHotspotMain stop")) {
+                    standbyScripts.incrementAndGet()
+                    // Still running when the duplicate standby arrives, like the 20 s timeout.
+                    Thread.sleep(4_000)
+                }
+                true
+            }
+
+            RootRadioPower.enterStandby(app)
+            Thread.sleep(3_500)
+            assertEquals(1, standbyScripts.get())
+            RootRadioPower.enterStandby(app)
+            Thread.sleep(6_000)
+
+            assertEquals("the teardown must not power the radios back on", 0, wakeScripts.get())
+        } finally {
+            RootRadioPower.rootAvailable = originalAvailable
+            RootRadioPower.executeRootScript = originalExecute
+            RootRadioPower.verifyRadioOff = originalVerify
+            RootRadioPower.bluetoothEnabled = originalBluetoothEnabled
+            RootRadioPower.setBluetoothEnabled = originalSetBluetooth
+            RootRadioPower.suspendedByStandby = false
+            RootRadioPower.lastStandbyRadioOff = null
+        }
+    }
+
+    @Test
     fun standbyGuardCutsTheRadiosAgainWhenSomethingTurnsThemBackOn() {
         val originalAvailable = RootRadioPower.rootAvailable
         val originalExecute = RootRadioPower.executeRootScript
