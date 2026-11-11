@@ -65,15 +65,24 @@ internal object LanTls {
     private fun customFile(context: Context) = AtomicFile(File(context.noBackupFilesDir, "browser-server-custom.p12"))
     fun hasCustom(context: Context) = customFile(context).baseFile.exists()
 
-    /** The certificate currently stored for the HTTPS listener, or null when the default CA is used. */
-    @Synchronized fun customCertificate(context: Context): X509Certificate? = runCatching {
+    /** Compare the whole installed chain, including intermediates needed by a fresh browser. */
+    @Synchronized fun hasCustomCertificateChain(context: Context, pem: ByteArray): Boolean = runCatching {
         val file = customFile(context)
-        if (!file.baseFile.exists()) return null
+        if (!file.baseFile.exists()) return false
         val store = KeyStore.getInstance("PKCS12")
         file.openRead().use { store.load(it, CharArray(0)) }
-        val alias = store.aliases().toList().firstOrNull { store.isKeyEntry(it) } ?: return null
-        store.getCertificate(alias) as? X509Certificate
-    }.getOrNull()
+        val alias = store.aliases().toList().firstOrNull { store.isKeyEntry(it) } ?: return false
+        val installed = store.getCertificateChain(alias) ?: return false
+        val expected = parsePemChain(pem)
+        expected.isNotEmpty() && installed.size == expected.size &&
+            installed.indices.all { installed[it].encoded.contentEquals(expected[it].encoded) }
+    }.getOrDefault(false)
+
+    private fun parsePemChain(pem: ByteArray): List<X509Certificate> =
+        // AndroidOpenSSL's bulk PEM reader can return only the first certificate. Use BC
+        // explicitly so the HTTPS identity retains every intermediate from the ACME response.
+        CertificateFactory.getInstance("X.509", provider).generateCertificates(pem.inputStream())
+            .map { it as X509Certificate }
 
     @Synchronized fun create(context: Context, addresses: List<String>, hostname: String = ""): Endpoint {
         val file = customFile(context)
@@ -124,8 +133,7 @@ internal object LanTls {
 
     fun preparePem(certificates: ByteArray, privateKey: ByteArray, password: CharArray = CharArray(0)): Prepared {
         require(certificates.size in 1..MAX_IMPORT_BYTES && privateKey.size in 1..MAX_IMPORT_BYTES) { "证书或私钥文件过大/为空" }
-        val chain = CertificateFactory.getInstance("X.509").generateCertificates(certificates.inputStream())
-            .map { it as X509Certificate }
+        val chain = parsePemChain(certificates)
         val converter = JcaPEMKeyConverter().setProvider(provider)
         val key = PEMParser(StringReader(privateKey.toString(Charsets.UTF_8))).use { parser ->
             var value = parser.readObject()

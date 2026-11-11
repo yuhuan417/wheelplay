@@ -498,3 +498,15 @@ Content-Length: 46
 3. `LanWebServer` 在 `/online/status.html` 返回 ConnMan 期望的 200、`X-ConnMan-Status: online` 和 46 字节空页面。
 
 因此热点没有上行时，车机也会认为 Wi-Fi 在线，不会回落到 LTE。注意探测**必须带 `/online/status.html` 路径**；访问根路径 `/` 得到的是正常车机显示页。
+
+## Let's Encrypt 证书链丢失：定位与修复（2026-11-11）
+
+通过 adb 转发读取当前真机的 TLS 握手：HTTPS 使用的域名证书与保存的 ACME 证书一致，但只发送 1 张证书；ACME 的 `chain.pem` 有 4 张，已安装的 PKCS#12 只有域名证书。系统信任库验证实时握手时报 `unable to get local issuer certificate`，使用保存的完整链验证则通过（含域名、有效期与服务器用途）。
+
+在同一台 Android 设备用只读探针复现：默认 `AndroidOpenSSL` 的 `CertificateFactory.generateCertificates()` 对该 PEM 返回 1 张；逐张解析得到 4 张。将完整链放入内存 PKCS#12 后，保存再加载仍有 4 张，Android Conscrypt 密钥管理器也返回 4 张，确认丢链发生在 PEM 解析阶段。
+
+修复使用显式 Bouncy Castle 解析完整 PEM 链；自动证书检查比较完整链，修复旧版留下的缺链身份。已有证书尚不需续签时，本地安装修复在等待互联网之前进行。签发后的 HTTPS 监听器替换逻辑原本就存在，无需重启 App。
+
+新增回归使用只返回第一张证书的平台解析器替身，验证缺链身份被识别、热替换后真实 HTTPS 握手包含完整链且能通过独立根证书验证、重启后完整链保留。TLS 和域名相关测试通过。本轮未覆盖安装 APK，手机仍运行旧版本；未取得昨天出错时的车机诊断，不能据此确定重启后恢复的具体原因。
+
+随后按用户要求构建 `:mobile:assembleProvisionedDebug` 并覆盖安装到连接的 MI 8。认证资产打包校验和 APK 签名验证通过。新版启动日志先记录证书安装成功，再等待互联网，确认旧版缺链身份可离线修复；安装后的 PKCS#12 和实时 TLS 握手均包含 4 张证书。Python 系统信任库与 OpenSSL 均通过域名、证书链校验，实时域名证书与原 ACME 文件逐字节一致，没有重新签发。车机页面仍需重新打开作最终验证。

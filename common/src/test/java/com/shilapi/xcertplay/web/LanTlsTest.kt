@@ -23,6 +23,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.StringWriter
 import java.math.BigInteger
 import java.net.ServerSocket
@@ -30,7 +31,12 @@ import java.net.URL
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.Provider
+import java.security.Security
+import java.security.cert.CRL
+import java.security.cert.Certificate
 import java.security.cert.CertificateFactory
+import java.security.cert.CertificateFactorySpi
 import java.security.cert.X509Certificate
 import java.util.Date
 import java.util.concurrent.TimeUnit
@@ -41,6 +47,16 @@ import javax.net.ssl.TrustManagerFactory
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class LanTlsTest {
+    /** Reproduces AndroidOpenSSL's single-certificate result for a concatenated PEM chain. */
+    class FirstPemOnlyCertificateFactory : CertificateFactorySpi() {
+        private val delegate = CertificateFactory.getInstance("X.509", BouncyCastleProvider())
+        override fun engineGenerateCertificate(input: InputStream): Certificate = delegate.generateCertificate(input)
+        override fun engineGenerateCertificates(input: InputStream): Collection<Certificate> =
+            listOf(engineGenerateCertificate(input))
+        override fun engineGenerateCRL(input: InputStream): CRL = delegate.generateCRL(input)
+        override fun engineGenerateCRLs(input: InputStream): Collection<CRL> = delegate.generateCRLs(input)
+    }
+
     @Before fun startWithoutRootAuthorization() {
         val identity = SyntheticMfiIdentity.create()
         MfiAssetStore(RuntimeEnvironment.getApplication().noBackupFilesDir)
@@ -116,6 +132,48 @@ class LanTlsTest {
             assertFalse(WebSession.tls!!.custom)
             assertTrue(httpsGet(WebSession.httpsPort).contains("WheelPlay"))
         } finally { WebSession.stop() }
+    }
+
+    @Test fun fullPemChainReplacesATruncatedIdentityWithoutRestartWithASingleCertificatePlatformParser() {
+        val context = RuntimeEnvironment.getApplication()
+        val identity = identity()
+        val chain = pem(*identity.chain.toTypedArray())
+        val platform = object : Provider("FirstPemOnly", 1.0, "Android single PEM regression") {
+            init { put("CertificateFactory.X.509", FirstPemOnlyCertificateFactory::class.java.name) }
+        }
+        Security.insertProviderAt(platform, 1)
+        try {
+            assertEquals(1, CertificateFactory.getInstance("X.509").generateCertificates(chain.inputStream()).size)
+            // An older installation saved the correct leaf but lost its issuer.
+            LanTls.preparePem(pem(identity.chain.first()), pem(identity.keys.private)).use { LanTls.saveCustom(context, it) }
+            assertFalse(LanTls.hasCustomCertificateChain(context, chain))
+            WebSession.start(context)
+            waitForHttps()
+            LanTls.preparePem(chain, pem(identity.keys.private)).use {
+                assertNull(WebSession.installCertificate(context, it))
+            }
+            assertTrue(LanTls.hasCustomCertificateChain(context, chain))
+            val trust = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+                load(null); setCertificateEntry("root", identity.chain.last())
+            }
+            val managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(trust) }
+            val client = SSLContext.getInstance("TLS").apply { init(null, managers.trustManagers, null) }
+            fun handshake() {
+                (client.socketFactory.createSocket("127.0.0.1", WebSession.httpsPort) as javax.net.ssl.SSLSocket).use {
+                    it.soTimeout = 3000
+                    it.sslParameters = it.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                    it.startHandshake()
+                    assertEquals(2, it.session.peerCertificates.size)
+                    assertArrayEquals(identity.chain.first().encoded, it.session.peerCertificates.first().encoded)
+                }
+            }
+            handshake()
+            WebSession.stop(); WebSession.start(context); waitForHttps()
+            handshake()
+        } finally {
+            WebSession.stop()
+            Security.removeProvider(platform.name)
+        }
     }
 
     @Test fun pkcs12SupportsPasswordAliasSelectionAndDistinctKeyPassword() {

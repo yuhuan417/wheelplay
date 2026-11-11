@@ -169,6 +169,13 @@ internal object OwnDomainManager {
                 lastAttemptedAddress = address
             }
             status = Status("检查中", "正在检查 DNSPod 解析与证书", config.domain, address)
+            val stored = readStored(context)
+            val valid = stored != null && stored.cert.notAfter.time - now > RENEW_BEFORE_MILLIS &&
+                matchesDomain(stored.cert, config.domain)
+            // Repair a previously truncated identity from the saved ACME chain even offline.
+            if (valid && !LanTls.hasCustomCertificateChain(context, stored.chain)) {
+                install(context, stored)
+            }
             val networks = awaitInternetNetworks(context)
             if (networks.isEmpty()) {
                 throw OwnDomainException(
@@ -202,14 +209,7 @@ internal object OwnDomainManager {
                 network.network.openConnection(URL(url)) as HttpURLConnection
             }
 
-            val stored = readStored(context)
-            val valid = stored != null && stored.cert.notAfter.time - now > RENEW_BEFORE_MILLIS &&
-                matchesDomain(stored.cert, config.domain)
             if (valid) {
-                val installed = LanTls.customCertificate(context)
-                if (installed == null || !installed.encoded.contentEquals(stored.cert.encoded)) {
-                    install(context, stored)
-                }
                 status = ready(config, address, stored.cert, "")
                 consecutiveFailures = 0
                 nextCheckAt = System.currentTimeMillis() + CHECK_INTERVAL_MILLIS
